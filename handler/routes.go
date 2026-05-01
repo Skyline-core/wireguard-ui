@@ -13,7 +13,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1455,15 +1457,16 @@ func WireGuardServer(db store.IStore) echo.HandlerFunc {
 		dnsCsv := strings.Join(globalSettings.DNSServers, ", ")
 
 		return renderShell(c, db, "server.html", map[string]interface{}{
-			"baseData":        model.BaseData{Active: "wg-server", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle":   fmt.Sprintf("Configuración de %s", ifaceName),
-			"serverInterface": server.Interface,
-			"serverKeyPair":   server.KeyPair,
-			"globalSettings":  globalSettings,
-			"wgIfaceName":     ifaceName,
-			"dnsCsv":          dnsCsv,
-			"serverBanner":    banner,
-			"allowWgQuick":    util.LookupEnvOrBool(util.AllowWgQuickCtlEnvVar, false),
+			"baseData":          model.BaseData{Active: "wg-server", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle":     fmt.Sprintf("Configuración de %s", ifaceName),
+			"serverInterface":   server.Interface,
+			"serverKeyPair":     server.KeyPair,
+			"globalSettings":    globalSettings,
+			"wgIfaceName":       ifaceName,
+			"dnsCsv":            dnsCsv,
+			"serverBanner":      banner,
+			"allowWgQuick":      util.LookupEnvOrBool(util.AllowWgQuickCtlEnvVar, false),
+			"needsWgConfApply": util.HashesChanged(db),
 		})
 	}
 }
@@ -1784,6 +1787,11 @@ func applyKernelAfterWritingWgConf(configFilePath string, wgQuickRestart bool) e
 		}
 		return nil
 	}
+	// With no wg-quick restart, optional syncconf must not fail when iface is absent (tunnel stopped on purpose).
+	if util.ShouldApplySyncconfAfterWrite() && !util.WgTunnelIsRunning(configFilePath) {
+		log.Infof("Skipping wg syncconf (tunnel down) after apply: %s", configFilePath)
+		return nil
+	}
 	if synErr := util.WgSyncConfFromSavedFile(configFilePath); synErr != nil {
 		return fmt.Errorf("config saved but kernel reload failed (%s): %w", configFilePath, synErr)
 	}
@@ -1815,7 +1823,19 @@ func applyWireGuardConfigToDisk(db store.IStore, tmplDir fs.FS, wgQuickRestart b
 		return fmt.Errorf("cannot get global settings: %w", err)
 	}
 
-	err = util.WriteWireGuardServerConfig(tmplDir, server, clients, users, settings)
+	canonical := strings.TrimSpace(settings.ConfigFilePath)
+	outPath := canonical
+	if wgQuickRestart {
+		util.RemoveWgConfPending(canonical)
+	} else if util.WgConfPendingWhenTunnelStopped() && runtime.GOOS == "linux" &&
+		canonical != "" && filepath.IsAbs(canonical) && !util.WgTunnelIsRunning(canonical) {
+		outPath = util.WgConfPendingPath(canonical)
+		log.Infof("Applying wg config while tunnel stopped: writing pending file %s (canonical %s)", outPath, canonical)
+	} else if canonical != "" {
+		util.RemoveWgConfPending(canonical)
+	}
+
+	err = util.WriteWireGuardServerConfig(tmplDir, server, clients, users, settings, outPath)
 	if err != nil {
 		log.Error("Cannot apply server config: ", err)
 		return err
@@ -1827,15 +1847,21 @@ func applyWireGuardConfigToDisk(db store.IStore, tmplDir fs.FS, wgQuickRestart b
 		return err
 	}
 
-	return applyKernelAfterWritingWgConf(settings.ConfigFilePath, wgQuickRestart)
+	return applyKernelAfterWritingWgConf(canonical, wgQuickRestart)
 }
 
 // ApplyServerConfig writes wg.conf and applies it to the kernel. Optional JSON body:
-//   - Empty body or absent key: try wg-quick restart (down+up); when not allowed or on failure, fall back to wg syncconf.
+//   - Empty body or omit restart_wireguard: restart only if util.WgTunnelIsRunning(ConfigFilePath) is true — avoids restarting a tunnel that was deliberately stopped via wg-quick down.
 //   - {"restart_wireguard":false}: syncconf only (e.g. session/appearance-only changes plus config dump without bringing the iface down).
+//   - {"restart_wireguard":true}: always run wg-quick restart (or systemd equivalent), even when the tunnel is currently down — use to bring WG up alongside applying the file.
 func ApplyServerConfig(db store.IStore, tmplDir fs.FS) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		restartWG := true
+		gsSnap, gsErr := db.GetGlobalSettings()
+		if gsErr != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot read global settings"})
+		}
+		restartWG := util.WgTunnelIsRunning(gsSnap.ConfigFilePath)
+
 		body, errRead := io.ReadAll(c.Request().Body)
 		if errRead != nil {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Cannot read request body"})
@@ -1947,7 +1973,11 @@ func WireGuardServerSave(db store.IStore, tmplDir fs.FS) echo.HandlerFunc {
 			}
 		}
 
-		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Servidor actualizado"})
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"status":               true,
+			"message":              "Servidor actualizado",
+			"needs_wg_conf_apply": util.HashesChanged(db),
+		})
 	}
 }
 
@@ -1978,6 +2008,22 @@ func WireGuardQuickStart(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
 		}
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Interfaz iniciada (wg-quick up)"})
+	}
+}
+
+// WireGuardTunnelStatus exposes util.WgTunnelIsRunning(gs.ConfigFilePath) for dashboards and tooling.
+func WireGuardTunnelStatus(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		gs, err := db.GetGlobalSettings()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot read global settings"})
+		}
+		confPath := strings.TrimSpace(gs.ConfigFilePath)
+		iface := util.WireGuardIfaceBasename(confPath)
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"tunnel_running": util.WgTunnelIsRunning(confPath),
+			"iface_name":     iface,
+		})
 	}
 }
 

@@ -158,10 +158,15 @@ Gate optional privileged actions invoked from the **Servidor** page (binary or D
 | `WGUI_WG_SYNCCONF_AFTER_APPLY` | When `true`, **Aplicar config** runs **`wg-quick strip <conf> \| wg syncconf <iface>`** on Linux so the running WireGuard matches the written file (e.g. disabling a client removes its peer from the server without `wg-quick down/up`). Requires `wg` and `wg-quick` on `$PATH`. If unset or `false`, Apply only writes the file/hash and does not reload kernel state. | `false` |
 | `WGUI_ALLOW_WG_QUICK` | When `true`, **Apply** can run `wg-quick` down/up and **Servidor** shows **Detener** / **Iniciar** / **Reiniciar**. If unset, wg-quick controls are **off**. Start with `WGUI_ALLOW_WG_QUICK=true` when you intend to restart the tunnel from the UI. Env values are trimmed before parsing. | `false` |
 | `WGUI_WG_RESTART_VIA_SYSTEMD` | On Linux, **Apply** prefers `systemctl restart wg-quick@ifac` when that unit exists (`LoadState=loaded`), so **`journalctl -u wg-quick@wg0`** shows restarts like a manual systemd restart. If `false` or no systemd, uses `wg-quick down`/`up`. | `true` |
+| `WGUI_WGCONF_PENDING_WHEN_TUNNEL_STOPPED` | Linux: when Apply does **not** restart WireGuard while the netdev is absent/down (e.g. after **Detener**), the UI writes a side file next to `wg.conf` (suffix `.wgui-pending`) instead of overwriting the live **`WGUI_CONFIG_FILE_PATH`**. That avoids systemd **`.path`** units watching `wg.conf` that restart `wg-quick` on every save. **`wg-quick up`** or **Servidor › Iniciar** merges the pending file into `wg.conf` first. Set `false` to always write `wg.conf` directly (legacy). | `true` |
 | `WGUI_LOG_TAIL_PATH` | Optional absolute path to a log file shown in the **Logs** page. This variable is read-only: wireguard-ui does not write this file automatically. | _(unset)_ |
 | `WGUI_WEBAUTHN_RP_ID` | Optional fixed WebAuthn RP ID (recommended behind reverse proxy/public domain). If unset, it is inferred from request host. | _(auto)_ |
 | `WGUI_WEBAUTHN_RP_ORIGINS` | Optional comma-separated allowed origins for Passkeys (example: `https://vpn.example.com,https://admin.example.com`). If unset, origin is inferred per request. | _(auto)_ |
 | `WGUI_WEBAUTHN_RP_DISPLAY_NAME` | Optional WebAuthn RP display name shown by authenticators. | `WireGuard UI` |
+
+#### Troubleshooting: `wg-quick up` fails on `ip -6 route` / «Cannot find device wg0»
+
+After toggling peers and **Iniciar**, a failed half-bridge can leave routing in an odd state; the UI now runs **`wg-quick down`** (ignored if already down), waits briefly, then **`wg-quick up`**, and **retries once** if the first `up` still errors. If it persists, exclude **`wg0`** from **NetworkManager** / **systemd-networkd**, and ensure IPv6 is consistent (either working or intentionally off) with the **`Address`** line in **`wg.conf`**.
 
 #### `WGUI_LOG_TAIL_PATH` quick setup (systemd)
 
@@ -279,7 +284,38 @@ If HTTPS still fails behind NAT, verify port 80 reaches Caddy on first certifica
 WireGuard-UI only takes care of configuration generation. On Linux you can enable in-process `wg syncconf` after apply (see variables above), or use systemd to watch for changes and restart the
 service. Following is an example:
 
-### Using systemd
+> **Note:** The **systemd** block below does **not** start the `wireguard-ui` web process. It only runs `systemctl restart wg-quick@wg0` when `wg0.conf` is modified on disk. The UI binary is a separate program (see **Run WireGuard-UI** above and **systemd unit for `wireguard-ui`** below).
+
+### systemd unit for `wireguard-ui` (web app)
+
+The app stores its JSON database under **`./db` relative to the process working directory**, so the unit should set `WorkingDirectory` to a folder you own (e.g. `/var/lib/wireguard-ui`) and place the binary on your `PATH` or use an absolute `ExecStart`.
+
+Example `/etc/systemd/system/wireguard-ui.service`:
+
+```ini
+[Unit]
+Description=WireGuard UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wireguard-ui
+Group=wireguard-ui
+WorkingDirectory=/var/lib/wireguard-ui
+Environment="BIND_ADDRESS=127.0.0.1:5000"
+# Optional: EnvironmentFile=-/etc/wireguard-ui.env
+ExecStart=/usr/local/bin/wireguard-ui
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Create the data directory and user as needed (names are examples), then `systemctl daemon-reload`, `systemctl enable --now wireguard-ui`.
+
+### Using systemd (restart `wg-quick` when config file changes)
 
 Create `/etc/systemd/system/wgui.service`
 

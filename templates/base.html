@@ -835,24 +835,32 @@
             var hasPendingGlobalPayload = false;
             try { pendingKindSnap = String(localStorage.getItem(WG_PENDING_KIND_KEY) || ''); } catch (eS) {}
             try { hasPendingGlobalPayload = !!localStorage.getItem('wg_pending_global_settings'); } catch (ePen) {}
-            /** Request wg-quick restart unless the only pending global-settings change is session/appearance (staged JSON exists and kind is ui_only).
-                If there is no staged global payload but a stale ui_only kind lingers in localStorage, do not force restart false. */
-            var restartWireguard = !(hasPendingGlobalPayload && pendingKindSnap === 'ui_only');
+            /** ui_only (session/appearance cards): never restart WG. wg_card / both / client-only: restart only if tunnel is actually up (GET tunnel-status). */
+            function resolveApplyPayloadFromTunnel(tunnelResp) {
+                if (hasPendingGlobalPayload && pendingKindSnap === 'ui_only') {
+                    return { restart_wireguard: false };
+                }
+                var tunnelUp = !!(tunnelResp && tunnelResp.tunnel_running);
+                return { restart_wireguard: tunnelUp };
+            }
 
-            var applyWgConfig = function (reloadAfterApplyForNav, doRestartWG) {
+            var applyPayload;
+
+            var applyWgConfig = function (reloadAfterApplyForNav) {
+                var skipKernelRestart = (applyPayload.restart_wireguard === false);
                 $.ajax({
                     cache: false,
                     method: 'POST',
                     url: '{{.basePath}}/api/apply-wg-config',
                     dataType: 'json',
                     contentType: "application/json",
-                    data: JSON.stringify({ restart_wireguard: !!doRestartWG }),
+                    data: JSON.stringify(applyPayload),
                     success: function(data) {
                         $("#modal_apply_config").modal('hide');
                         toastr.success(wgT('js.apply_config_success'));
                         var finalizeApplyUI = function () {
                             updateApplyConfigVisibility();
-                            if (!reloadAfterApplyForNav && !doRestartWG && !wgSyncconfAfterApplyEnabled) {
+                            if (!reloadAfterApplyForNav && skipKernelRestart && !wgSyncconfAfterApplyEnabled) {
                                 showManualKernelReloadHelp(wgT('js.apply_kernel_hint'));
                             }
                         };
@@ -873,22 +881,36 @@
                 });
             };
 
-            var staged = wgPostPendingGlobalSettingsIfNeeded({});
-            staged.done(function (postedGlobalFromServer) {
-                applyWgConfig(!!postedGlobalFromServer, restartWireguard);
-            }).fail(function (xhr) {
-                var msg = wgT('js.global_post_fail');
-                try {
-                    if (xhr.responseJSON && xhr.responseJSON.message) {
-                        msg = xhr.responseJSON.message;
-                    } else if (xhr.responseText) {
-                        var j = JSON.parse(xhr.responseText);
-                        if (j && j.message) msg = j.message;
-                    }
-                } catch (e6) {}
-                toastr.error(msg);
-                confirmBtn.prop("disabled", false);
-            });
+            function runStagedThenApply() {
+                var staged = wgPostPendingGlobalSettingsIfNeeded({});
+                staged.done(function (postedGlobalFromServer) {
+                    applyWgConfig(!!postedGlobalFromServer);
+                }).fail(function (xhr) {
+                    var msg = wgT('js.global_post_fail');
+                    try {
+                        if (xhr.responseJSON && xhr.responseJSON.message) {
+                            msg = xhr.responseJSON.message;
+                        } else if (xhr.responseText) {
+                            var j = JSON.parse(xhr.responseText);
+                            if (j && j.message) msg = j.message;
+                        }
+                    } catch (e6) {}
+                    toastr.error(msg);
+                    confirmBtn.prop("disabled", false);
+                });
+            }
+
+            $.getJSON('{{.basePath}}/api/wireguard/tunnel-status')
+                .done(function (ts) {
+                    applyPayload = resolveApplyPayloadFromTunnel(ts);
+                    runStagedThenApply();
+                })
+                .fail(function () {
+                    applyPayload = (hasPendingGlobalPayload && pendingKindSnap === 'ui_only')
+                        ? { restart_wireguard: false }
+                        : {};
+                    runStagedThenApply();
+                });
         });
     });
 

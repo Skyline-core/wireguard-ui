@@ -63,15 +63,16 @@ body.wg-body.wg-theme-light .logo-ico img{filter:invert(1)}
 
 /* Client cards: overlay only covers peer column (.cc-head-main), never the action chips */
 .wg-client-card.client-card{position:relative;background:var(--card);border:1px solid var(--bdr);border-radius:var(--rlg);margin-bottom:12px;overflow:visible}
-.wg-client-card .cc-head{display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-bottom:1px solid transparent;background:var(--card);border-radius:inherit}
+.wg-client-card .cc-head{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px;border-bottom:1px solid transparent;background:var(--card);border-radius:inherit}
 .wg-client-card.expanded .cc-head{border-bottom-color:var(--bdr);border-radius:var(--rlg) var(--rlg) 0 0}
+.wg-client-card .cc-head-top{display:flex;align-items:flex-start;gap:10px;width:100%;min-width:0}
 .wg-client-card .cc-head-main{position:relative;flex:1;min-width:0;display:flex;align-items:flex-start;min-height:52px;border-radius:12px}
 .wg-client-card .cc-head-main .wg-paused-overlay{position:absolute;inset:0;z-index:2;border-radius:inherit;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center}
 .wg-client-card[data-wg-enabled="false"] .cc-head-main .cc-peer-click{pointer-events:none}
 .wg-client-card[data-wg-enabled="false"] .cc-body-inner{opacity:.45;pointer-events:none;filter:grayscale(.25)}
 .wg-client-card .cc-head-main .cc-peer-click{position:relative;z-index:1;display:flex;gap:12px;align-items:flex-start;cursor:pointer;width:100%;min-width:0}
 /* Header right: status badge + enable toggle */
-.wg-client-card .cc-head-right{display:flex;align-items:center;flex-shrink:0;gap:10px;margin-left:auto}
+.wg-client-card .cc-head-right{display:flex;align-items:center;flex-shrink:0;gap:10px}
 .wg-cc-badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:var(--t2);}
 .wg-cc-badge-dot{width:7px;height:7px;border-radius:50%;background:#757575;}
 .wg-cc-badge-on{color:#66BB6A;}
@@ -86,15 +87,18 @@ body.wg-body.wg-theme-light .logo-ico img{filter:invert(1)}
 .wg-cc-switch input:checked + .wg-cc-switch-track{background:rgba(239,83,80,.35);border-color:rgba(239,83,80,.55);}
 .wg-cc-switch input:checked + .wg-cc-switch-track:after{left:21px;background:var(--acc,#EF5350);}
 .wg-client-card .wg-title{font-size:14px;font-weight:800;color:var(--t1);}
-/* Header meta row: email / dates / DNS as spaced chips */
-.wg-client-card .cc-extra-lines{display:flex;flex-wrap:wrap;gap:8px 12px;margin-top:10px;max-width:100%;padding-top:2px;}
-.wg-client-card .cc-chip{display:inline-flex;align-items:flex-start;gap:8px;padding:6px 11px;background:var(--ele);border:1px solid var(--bdr);border-radius:10px;font-size:11px;line-height:1.45;color:var(--t1);max-width:100%;}
-.wg-client-card .cc-chip i.fas{width:14px;text-align:center;flex-shrink:0;margin-top:2px;color:#EF5350;opacity:.9;}
+/* Header meta: same rhythm as .cc-field — grid on mobile avoids mis-sized flex chips */
+.wg-client-card .cc-extra-lines{display:grid;grid-template-columns:1fr;gap:10px;margin:0;width:100%;min-width:0;box-sizing:border-box;padding-top:0;position:relative;z-index:1}
+@media(min-width:560px){.wg-client-card .cc-extra-lines{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(min-width:900px){.wg-client-card .cc-extra-lines{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.wg-client-card .cc-chip{display:flex;flex-direction:row;align-items:flex-start;gap:10px;min-width:0;width:100%;box-sizing:border-box;padding:9px 11px;background:var(--ele);border:1px solid var(--bdr);border-radius:var(--rsm);font-size:11px;line-height:1.35;color:var(--t1)}
+.wg-client-card .cc-chip i.fas{width:15px;text-align:center;flex-shrink:0;margin-top:1px;color:#EF5350;opacity:.9}
 .wg-client-card .cc-chip .text-muted-cc{opacity:.45!important;color:var(--t3)!important;}
-.wg-client-card .cc-chip-label{font-size:10px;color:var(--t3);font-weight:600;text-transform:none;margin-right:2px;}
-.wg-client-card .cc-chip-dat,.wg-client-card .cc-chip-val{font-variant-numeric:tabular-nums;color:var(--t1);}
-.wg-client-card .cc-chip-wide{flex:1 1 100%;min-width:min(100%,220px);}
-.wg-client-card .cc-chip-val{word-break:break-word;}
+.wg-client-card .cc-chip-body{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;flex:1}
+.wg-client-card .cc-chip-k{font-size:9px;color:var(--t3);font-weight:700;letter-spacing:.35px;text-transform:uppercase;line-height:1.2}
+.wg-client-card .cc-chip-dat{font-variant-numeric:tabular-nums;color:var(--t1);font-size:11px;line-height:1.25;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wg-client-card .cc-chip-val{font-variant-numeric:tabular-nums;color:var(--t1);font-size:11px;line-height:1.3;word-break:break-word;max-width:100%}
+.wg-client-card .cc-chip-wide{grid-column:1/-1}
 .wg-client-card .wg-traf-rx{color:#EF5350!important;font-weight:600;}
 .wg-client-card .wg-traf-tx{color:#FFCA28!important;font-weight:600;}
 .wg-client-card .cc-pub{margin-top:14px;padding:12px 14px;background:var(--ele);border-radius:var(--rsm);border:1px solid var(--bdr);}
@@ -243,6 +247,17 @@ body.wg-body.wg-theme-light .wg-srv-help{
 body.wg-body.wg-theme-light .wg-mini-badge{
 	background:var(--ele) !important;
 	border:1px solid var(--bdr) !important;
+}
+/* Dashboard WireGuard server status: explicit green/red in light theme (generic .wg-mini-badge above would mute it) */
+body.wg-body.wg-theme-light .wg-mini-badge.wg-srv-status--active{
+	color:#2e7d32 !important;
+	background:rgba(102,187,106,.14) !important;
+	border-color:rgba(76,175,80,.4) !important;
+}
+body.wg-body.wg-theme-light .wg-mini-badge.wg-srv-status--inactive{
+	color:#c62828 !important;
+	background:rgba(239,83,80,.1) !important;
+	border-color:rgba(239,83,80,.35) !important;
 }
 body.wg-body.wg-theme-light .wg-set-row label,
 body.wg-body.wg-theme-light .wg-help dt,

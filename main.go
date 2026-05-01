@@ -269,6 +269,8 @@ func main() {
 	app.POST(util.BasePath+"/api/wg-server/save-page", handler.WireGuardServerSave(db, tmplDir), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
 	app.POST(util.BasePath+"/api/wireguard/wg-quick-down", handler.WireGuardQuickStop(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
 	app.POST(util.BasePath+"/api/wireguard/wg-quick-up", handler.WireGuardQuickStart(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
+	// Same session gate as /api/apply-wg-config (ValidSession, not admin-only) so managers can align restart with tunnel state.
+	app.GET(util.BasePath+"/api/wireguard/tunnel-status", handler.WireGuardTunnelStatus(db), handler.ValidSession, handler.RefreshSession)
 	app.POST(util.BasePath+"/wg-server/keypair", handler.WireGuardServerKeyPair(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
 	app.GET(util.BasePath+"/global-settings", handler.GlobalSettings(db), handler.ValidSession, handler.RefreshSession, handler.NeedsAdmin)
 	app.POST(util.BasePath+"/global-settings", handler.GlobalSettingSubmit(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
@@ -348,7 +350,7 @@ func initServerConfig(db store.IStore, tmplDir fs.FS) {
 	}
 
 	// write config file
-	err = util.WriteWireGuardServerConfig(tmplDir, server, clients, users, settings)
+	err = util.WriteWireGuardServerConfig(tmplDir, server, clients, users, settings, "")
 	if err != nil {
 		log.Fatalf("Cannot create server config: %v", err)
 	}

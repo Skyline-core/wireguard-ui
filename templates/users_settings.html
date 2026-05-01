@@ -67,7 +67,7 @@
                 <h4 class="modal-title font-weight-bold">{{ tr .UILang "users.modal_new_title" }}</h4>
                 <button type="button" class="close" data-dismiss="modal">&times;</button>
             </div>
-            <div class="modal-body">
+                <div class="modal-body">
                 <div class="form-row">
                     <div class="form-group col-md-6">
                         <label>{{ tr .UILang "users.lbl_display_name" }}</label>
@@ -77,12 +77,12 @@
                         <label>{{ tr .UILang "users.lbl_username" }}</label>
                         <input type="text" class="form-control" id="wu_new_username" placeholder="{{ tr .UILang "users.ph_username_ex" }}"/>
                     </div>
-                </div>
-                <div class="form-group">
+                    </div>
+                    <div class="form-group">
                     <label>{{ tr .UILang "users.lbl_email" }}</label>
                     <input type="email" class="form-control" id="wu_new_email" placeholder="{{ tr .UILang "profile.ph_email" }}"/>
-                </div>
-                <div class="form-group">
+                    </div>
+                    <div class="form-group">
                     <label>{{ tr .UILang "users.lbl_initial_pw" }}</label>
                     <input type="password" class="form-control" id="wu_new_password" autocomplete="new-password" placeholder="{{ tr .UILang "users.ph_min_pw" }}"/>
                 </div>
@@ -435,12 +435,12 @@
             toastr.error(wgT('users.err_username_req'));
             return;
         }
-        $.ajax({
-            cache: false,
-            method: 'POST',
+            $.ajax({
+                cache: false,
+                method: 'POST',
             url: BASE + '/update-user',
             contentType: 'application/json',
-            dataType: 'json',
+                dataType: 'json',
             data: JSON.stringify({
                 previous_username: prev,
                 username: un,
@@ -479,12 +479,12 @@
     $('#wu_del_confirm').click(function () {
         if (!pendingDel) return;
         var un = pendingDel;
-        $.ajax({
-            cache: false,
+                $.ajax({
+                    cache: false,
             method: 'POST',
             url: BASE + '/remove-user',
             contentType: 'application/json',
-            dataType: 'json',
+                    dataType: 'json',
             data: JSON.stringify({ username: un }),
             success: function () {
                 toastr.success(wgT('users.ok_user_deleted'));
@@ -533,12 +533,12 @@
         var u = usersCache.find(function (x) { return x.username === un; });
         if (!u || u.disabled) return;
         if (!confirm(wgT('users.confirm_revoke_fmt').replace(/\{username\}/g, String(un)))) return;
-        $.ajax({
-            cache: false,
-            method: 'POST',
+            $.ajax({
+                cache: false,
+                method: 'POST',
             url: BASE + '/api/user/revoke-sessions',
             contentType: 'application/json',
-            dataType: 'json',
+                dataType: 'json',
             data: JSON.stringify({ username: un }),
             success: function (resp) {
                 toastr.success((resp && resp.message) || wgT('users.ok_sessions_revoked'));
@@ -561,12 +561,12 @@
         if (nextDis) {
             if (!confirm(wgT('users.confirm_suspend_fmt').replace(/\{username\}/g, String(un)))) return;
         }
-        $.ajax({
-            cache: false,
-            method: 'POST',
+            $.ajax({
+                cache: false,
+                method: 'POST',
             url: BASE + '/api/user/set-disabled',
             contentType: 'application/json',
-            dataType: 'json',
+                dataType: 'json',
             data: JSON.stringify({ username: un, disabled: nextDis }),
             success: function (resp) {
                 toastr.success((resp && resp.message) || wgT('users.ok_state_updated'));

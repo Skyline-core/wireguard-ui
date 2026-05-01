@@ -68,17 +68,17 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
                 {{- else -}}
                 {{ tr $.UILang "server.banner_no_iface" }}
                 {{- end -}}
-            </div>
+                    </div>
             <div class="wg-srv-ban-meta">
                 {{ tr $.UILang "server.banner_port" }} {{if .UdpListenPortCfg}}{{.UdpListenPortCfg}}{{else}}—{{end}}/UDP
                 · {{.WgPeersTotal}} {{ tr $.UILang "server.banner_peers" }}
                 · {{ printf (tr $.UILang "server.banner_hs_fmt") .WgPeersRecent }}
                 {{- if .HostUptime}}{{ tr $.UILang "server.banner_uptime" }} {{.HostUptime}}{{end}}
-            </div>
+                            </div>
             {{ if ne .WgBackendErr "" }}
             <div class="wg-srv-ban-meta" style="color:#ffb4b4;margin-top:6px;">{{.WgBackendErr}}</div>
             {{ end }}
-        </div>
+                            </div>
         <div class="wg-srv-ban-actions">
             <button type="button" class="wg-btn bg" id="wg_srv_btn_apply_config"
                 {{if $.baseData.Admin}}title="{{ tr $.UILang "server.tooltip_apply_dump" }}"
@@ -91,8 +91,8 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
             <button type="button" class="wg-btn bp" id="wg_srv_wg_quick_up" {{if $.baseData.Admin}}{{else}}disabled{{end}}><i class="fas fa-play-circle"></i> {{ tr $.UILang "server.quick_up" }}</button>
             {{end}}
             {{end}}
-        </div>
-    </div>
+                            </div>
+                            </div>
     {{ end }}
 
     <input type="hidden" id="wg_srv_initial_json" value="" />
@@ -108,15 +108,15 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
                 <div>
                     <span class="wg-srv-label">{{ tr .UILang "server.lbl_ip_addr" }}</span>
                     <input type="text" data-role="tagsinput" class="form-control wg-srv-input srv-tags" style="padding:8px;background:#252525;border-color:rgba(255,255,255,.08);color:inherit;" id="srv_addresses" value="" />
-                </div>
+                            </div>
                 <div>
                     <span class="wg-srv-label">{{ tr .UILang "server.lbl_listen_port" }}</span>
                     <input type="text" class="wg-srv-input" id="srv_listen_port" name="listen_port" inputmode="numeric" value="{{if .serverInterface}}{{.serverInterface.ListenPort}}{{end}}" />
-                </div>
+                        </div>
                 <div>
                     <span class="wg-srv-label">{{ tr .UILang "server.lbl_mtu" }}</span>
                     <input type="text" class="wg-srv-input" id="srv_mtu" inputmode="numeric" value="{{if .globalSettings.MTU}}{{.globalSettings.MTU}}{{end}}" />
-                </div>
+                        </div>
                 <div>
                     <span class="wg-srv-label">{{ tr .UILang "server.lbl_dns" }}</span>
                     <input type="text" class="wg-srv-input" id="srv_dns" autocomplete="off" value="{{ .dnsCsv }}" placeholder="1.1.1.1, 8.8.8.8" />
@@ -155,10 +155,10 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
                 <div>
                     <span class="wg-srv-label">{{ tr .UILang "server.lbl_post_down" }}</span>
                     <textarea class="wg-srv-textarea" id="srv_post_down" name="post_down">{{if .serverInterface}}{{.serverInterface.PostDown}}{{end}}</textarea>
-                </div>
-            </div>
-        </div>
-    </div>
+                                </div>
+                            </div>
+                            </div>
+                        </div>
 
     <div class="wg-srv-pane">
         <h4><i class="fas fa-shield-alt"></i> {{ tr .UILang "server.section_firewall" }}</h4>
@@ -183,7 +183,7 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
                     <p>{{ printf (tr $.UILang "server.opt_persist_body_fmt") .wgIfaceName }}</p>
                 </div>
                 <label style="cursor:pointer;display:inline-flex;"><input type="checkbox" role="switch" class="wg-toggle" id="opt_persist_conf" {{if .globalSettings.PersistWgConfOnSave}}checked{{end}}{{if $.baseData.Admin}}{{else}}disabled{{end}} /></label>
-            </div>
+                        </div>
             <div class="wg-srv-opt">
                 <div>
                     <h5>{{ tr $.UILang "server.opt_auto_title" }}</h5>
@@ -226,7 +226,7 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
         var wgSrvSnap = null;
         var wgSrvKernelListening = {{if and .serverBanner .serverBanner.IsListening}}true{{else}}false{{end}};
         var wgSrvIsAdmin = {{if .baseData.Admin}}true{{else}}false{{end}};
-        var wgSrvPendingApply = false;
+        var wgSrvPendingApply = {{if .needsWgConfApply}}true{{else}}false{{end}};
 
         function wgSrvGatherPayload() {
             const addresses = $("#srv_addresses").val() ? $("#srv_addresses").val().split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
@@ -260,20 +260,14 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
         function wgSrvRefreshApplyButton() {
             var btn = $("#wg_srv_btn_apply_config");
             if (!btn.length) return;
-            var shouldEnable = wgSrvIsAdmin && (wgSrvIsDirty() || wgSrvPendingApply);
-            btn.prop("disabled", !shouldEnable);
+            var show = wgSrvIsAdmin && (wgSrvIsDirty() || wgSrvPendingApply);
+            btn.toggle(show);
+            if (!show) return;
             if (wgSrvIsDirty()) {
                 btn.html('<i class="fas fa-save"></i> ' + wgT('server.js_btn_save_apply'));
+                btn.attr("title", wgT('server.js_tooltip_dirty_apply'));
             } else {
                 btn.html('<i class="fas fa-file-export"></i> ' + wgT('top.apply_config'));
-            }
-            if (!shouldEnable && wgSrvIsAdmin) {
-                btn.attr("title", wgT('server.js_tooltip_no_dirty'));
-            } else if (wgSrvIsDirty()) {
-                btn.attr("title", wgT('server.js_tooltip_dirty_apply'));
-            } else if (wgSrvPendingApply) {
-                btn.attr("title", wgT('server.js_tooltip_apply_file'));
-            } else if (wgSrvIsAdmin) {
                 btn.attr("title", wgT('server.js_tooltip_apply_file'));
             }
         }
@@ -306,10 +300,10 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
                 dataType: "json",
                 contentType: "application/json",
                 data: JSON.stringify(payload),
-                success: function () {
+                success: function (data) {
                     toastr.success(wgT('server.js_ok_updated'));
                     wgSrvSaveSnap();
-                    wgSrvPendingApply = true;
+                    wgSrvPendingApply = !!(data && data.needs_wg_conf_apply);
                     wgSrvRefreshApplyButton();
                     if (typeof updateApplyConfigVisibility === "function") { updateApplyConfigVisibility(); }
                     if (typeof onSuccess === "function") onSuccess();
@@ -321,29 +315,43 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
             });
         }
 
+        function wgSrvTunnelDownApplyHint() {
+            return wgSrvKernelListening ? '' : ('\n\n' + wgT('server.js_tunnel_down_apply_note'));
+        }
+
         function wgSrvApplyConfigNow() {
-            $.ajax({
-                cache: false,
-                method: "POST",
-                url: "{{.basePath}}/api/apply-wg-config",
-                dataType: "json",
-                contentType: "application/json",
-                data: JSON.stringify({}),
-                success: function () {
-                    toastr.success(wgT('server.js_ok_applied_conf'));
-                    wgSrvPendingApply = false;
-                    wgSrvRefreshApplyButton();
-                    if (typeof updateApplyConfigVisibility === "function") { updateApplyConfigVisibility(); }
-                },
-                error: function (jqXHR) {
-                    try {
-                        var responseJson = jQuery.parseJSON(jqXHR.responseText);
-                        toastr.error(responseJson.message || jqXHR.responseText);
-                    } catch (e) {
-                        toastr.error(jqXHR.responseText || wgT('server.js_err_generic'));
-                    }
-                },
-            });
+            function doPost(restartWg) {
+                var body = (restartWg === undefined) ? {} : { restart_wireguard: !!restartWg };
+                $.ajax({
+                    cache: false,
+                    method: "POST",
+                    url: "{{.basePath}}/api/apply-wg-config",
+                    dataType: "json",
+                    contentType: "application/json",
+                    data: JSON.stringify(body),
+                    success: function () {
+                        toastr.success(wgT('server.js_ok_applied_conf'));
+                        wgSrvPendingApply = false;
+                        wgSrvRefreshApplyButton();
+                        if (typeof updateApplyConfigVisibility === "function") { updateApplyConfigVisibility(); }
+                    },
+                    error: function (jqXHR) {
+                        try {
+                            var responseJson = jQuery.parseJSON(jqXHR.responseText);
+                            toastr.error(responseJson.message || jqXHR.responseText);
+                        } catch (e) {
+                            toastr.error(jqXHR.responseText || wgT('server.js_err_generic'));
+                        }
+                    },
+                });
+            }
+            $.getJSON("{{.basePath}}/api/wireguard/tunnel-status")
+                .done(function (ts) {
+                    doPost(!!(ts && ts.tunnel_running));
+                })
+                .fail(function () {
+                    doPost(undefined);
+                });
         }
 
         function wgSrvValidateMtu() {
@@ -368,16 +376,16 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
         $("#wg_srv_btn_apply_config").on("click", function () {
             if ($(this).prop("disabled")) return;
             if (wgSrvIsDirty()) {
-                if (!confirm(wgT('server.js_confirm_dirty_then_apply'))) {
+                if (!confirm(wgT('server.js_confirm_dirty_then_apply') + wgSrvTunnelDownApplyHint())) {
                     return;
                 }
                 wgSrvSaveCurrent(function () {
-                    if (!confirm(wgT('server.js_confirm_saved_apply'))) return;
+                    if (!confirm(wgT('server.js_confirm_saved_apply') + wgSrvTunnelDownApplyHint())) return;
                     wgSrvApplyConfigNow();
                 });
                 return;
             }
-            if (!confirm(wgT('server.js_confirm_apply_saved'))) return;
+            if (!confirm(wgT('server.js_confirm_apply_saved') + wgSrvTunnelDownApplyHint())) return;
             wgSrvApplyConfigNow();
         });
 

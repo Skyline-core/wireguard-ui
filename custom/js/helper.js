@@ -177,52 +177,63 @@ function renderClientList(data, peerTraffic) {
                 ' data-wg-online="' + (c.enabled ? '1' : '0') + '" data-wg-enabled="' + (c.enabled ? 'true' : 'false') + '"' +
                 ' data-client-pubkey="' + wgEscapeAttr(pkRaw) + '">' +
                 '<div class="cc-head">' +
-                    '<div class="cc-head-main">' +
-                        '<div class="wg-paused-overlay" id="paused_' + id + '" style="' + overlayStyle + '" title="' + wgEscapeAttr(wgT('helper.client_disabled')) + '">' +
-                            '<i class="paused-client fas fa-3x fa-play" onclick="resumeClient(\'' + id + '\')" style="cursor:pointer;color:var(--acc,#EF5350);position:relative;z-index:3" aria-hidden="true"></i>' +
-                        '</div>' +
-                        '<div class="cc-peer-click" onclick="wgTogglePeerCard(this.closest(\'.wg-client-card\'))">' +
-                            '<div class="cc-avatar">' +
-                                '<i class="fas fa-laptop" style="color:#EF5350"></i>' +
+                    '<div class="cc-head-top">' +
+                        '<div class="cc-head-main">' +
+                            '<div class="wg-paused-overlay" id="paused_' + id + '" style="' + overlayStyle + '" title="' + wgEscapeAttr(wgT('helper.client_disabled')) + '">' +
+                                '<i class="paused-client fas fa-3x fa-play" onclick="resumeClient(\'' + id + '\')" style="cursor:pointer;color:var(--acc,#EF5350);position:relative;z-index:3" aria-hidden="true"></i>' +
                             '</div>' +
-                            '<div class="cc-info">' +
-                                '<span class="info-box-text wg-title"><i class="fas fa-user"></i> ' + wgEscapeHtml(c.name) + '</span>' +
-                                '<span class="info-box-text" style="display:none"><i class="fas fa-envelope"></i>' +
-                                    wgEscapeHtml(c.email || '') + '</span>' +
-                                '<div class="cc-meta">' + wgEscapeHtml(ipsJoined) + ' · ' + wgEscapeHtml(wgT('helper.updated')) + ' ' + prettyDateTime(c.updated_at) + '</div>' +
-                                '<span class="info-box-text" style="display:none"><i class="fas fa-key"></i>' + wgEscapeHtml(c.public_key || '') + '</span>' +
-                                '<span class="info-box-text" style="display:none"><i class="fas fa-subnetrange"></i>' + wgEscapeHtml(subnetRangesString) + '</span>' +
-                                telegramHtml + notesHtml +
-                                '<div class="cc-extra-lines" aria-label="' + wgEscapeAttr(wgT('helper.peer_meta_aria')) + '">' +
-                                    '<span class="cc-chip" title="' + wgEscapeAttr(wgT('helper.email_title')) + '"><i class="fas fa-envelope" aria-hidden="true"></i>' +
-                                        '<span class="cc-chip-val">' + wgEscapeHtml(c.email || '—') + '</span></span>' +
-                                    '<span class="cc-chip" title="' + wgEscapeAttr(wgT('helper.created_chip_title')) + '">' +
-                                        '<i class="fas fa-clock" aria-hidden="true"></i>' +
-                                        '<span class="cc-chip-label">' + wgEscapeHtml(wgT('helper.created_lbl')) + '</span>' +
-                                        '<span class="cc-chip-dat">' + prettyDateTime(c.created_at) + '</span></span>' +
-                                    '<span class="cc-chip" title="' + wgEscapeAttr(wgT('helper.updated_chip_title')) + '">' +
-                                        '<i class="fas fa-history" aria-hidden="true"></i>' +
-                                        '<span class="cc-chip-label">' + wgEscapeHtml(wgT('helper.updated_lbl')) + '</span>' +
-                                        '<span class="cc-chip-dat">' + prettyDateTime(c.updated_at) + '</span></span>' +
-                                    '<span class="cc-chip">' +
-                                        '<i class="fas fa-server' + (c.use_server_dns ? '' : ' text-muted-cc') +
-                                        '" aria-hidden="true"></i>' +
-                                        '<span class="cc-chip-val">' + dnsChipTxt + '</span></span>' +
-                                    (c.additional_notes ? '<span class="cc-chip cc-chip-wide"><i class="fas fa-file-alt" aria-hidden="true"></i>' +
-                                        '<span class="cc-chip-val">' + wgEscapeHtml(c.additional_notes) + '</span></span>' : '') +
+                            '<div class="cc-peer-click" onclick="wgTogglePeerCard(this.closest(\'.wg-client-card\'))">' +
+                                '<div class="cc-avatar">' +
+                                    '<i class="fas fa-laptop" style="color:#EF5350"></i>' +
+                                '</div>' +
+                                '<div class="cc-info">' +
+                                    '<span class="info-box-text wg-title"><i class="fas fa-user"></i> ' + wgEscapeHtml(c.name) + '</span>' +
+                                    '<span class="info-box-text" style="display:none"><i class="fas fa-envelope"></i>' +
+                                        wgEscapeHtml(c.email || '') + '</span>' +
+                                    '<div class="cc-meta">' + wgEscapeHtml(ipsJoined) + ' · ' + wgEscapeHtml(wgT('helper.updated')) + ' ' + prettyDateTime(c.updated_at) + '</div>' +
+                                    '<span class="info-box-text" style="display:none"><i class="fas fa-key"></i>' + wgEscapeHtml(c.public_key || '') + '</span>' +
+                                    '<span class="info-box-text" style="display:none"><i class="fas fa-subnetrange"></i>' + wgEscapeHtml(subnetRangesString) + '</span>' +
+                                    telegramHtml + notesHtml +
                                 '</div>' +
                             '</div>' +
                         '</div>' +
+                        '<div class="cc-head-right" onclick="event.stopPropagation()">' +
+                            '<span class="wg-cc-badge ' + (c.enabled ? 'wg-cc-badge-on' : 'wg-cc-badge-off') + '">' +
+                                '<span class="wg-cc-badge-dot" aria-hidden="true"></span>' +
+                                '<span class="wg-cc-badge-txt">' + wgEscapeHtml(c.enabled ? wgT('helper.badge_online') : wgT('helper.badge_blocked')) + '</span></span>' +
+                            '<label class="wg-cc-switch" title="' + wgEscapeAttr(wgT('helper.switch_peer')) + '">' +
+                                '<input type="checkbox" class="wg-cc-toggle"' + (c.enabled ? ' checked' : '') +
+                                ' data-clientid="' + id + '" onchange="wgPeerToggleEnable(event,this)" onclick="event.stopPropagation()"/>' +
+                                '<span class="wg-cc-switch-track" aria-hidden="true"></span>' +
+                            '</label>' +
+                        '</div>' +
                     '</div>' +
-                    '<div class="cc-head-right" onclick="event.stopPropagation()">' +
-                        '<span class="wg-cc-badge ' + (c.enabled ? 'wg-cc-badge-on' : 'wg-cc-badge-off') + '">' +
-                            '<span class="wg-cc-badge-dot" aria-hidden="true"></span>' +
-                            '<span class="wg-cc-badge-txt">' + wgEscapeHtml(c.enabled ? wgT('helper.badge_online') : wgT('helper.badge_blocked')) + '</span></span>' +
-                        '<label class="wg-cc-switch" title="' + wgEscapeAttr(wgT('helper.switch_peer')) + '">' +
-                            '<input type="checkbox" class="wg-cc-toggle"' + (c.enabled ? ' checked' : '') +
-                            ' data-clientid="' + id + '" onchange="wgPeerToggleEnable(event,this)" onclick="event.stopPropagation()"/>' +
-                            '<span class="wg-cc-switch-track" aria-hidden="true"></span>' +
-                        '</label>' +
+                    '<div class="cc-extra-lines" onclick="event.stopPropagation()" aria-label="' + wgEscapeAttr(wgT('helper.peer_meta_aria')) + '">' +
+                        '<span class="cc-chip" title="' + wgEscapeAttr(wgT('helper.email_title')) + '">' +
+                            '<i class="fas fa-envelope" aria-hidden="true"></i>' +
+                            '<span class="cc-chip-body">' +
+                                '<span class="cc-chip-k">' + wgEscapeHtml(wgT('helper.email_short_lbl')) + '</span>' +
+                                '<span class="cc-chip-val">' + wgEscapeHtml(c.email || '—') + '</span></span></span>' +
+                        '<span class="cc-chip" title="' + wgEscapeAttr(wgT('helper.created_chip_title')) + '">' +
+                            '<i class="fas fa-clock" aria-hidden="true"></i>' +
+                            '<span class="cc-chip-body">' +
+                                '<span class="cc-chip-k">' + wgEscapeHtml(wgT('helper.created_lbl')) + '</span>' +
+                                '<span class="cc-chip-dat">' + wgEscapeHtml(prettyDateTime(c.created_at)) + '</span></span></span>' +
+                        '<span class="cc-chip" title="' + wgEscapeAttr(wgT('helper.updated_chip_title')) + '">' +
+                            '<i class="fas fa-history" aria-hidden="true"></i>' +
+                            '<span class="cc-chip-body">' +
+                                '<span class="cc-chip-k">' + wgEscapeHtml(wgT('helper.updated_lbl')) + '</span>' +
+                                '<span class="cc-chip-dat">' + wgEscapeHtml(prettyDateTime(c.updated_at)) + '</span></span></span>' +
+                        '<span class="cc-chip">' +
+                            '<i class="fas fa-server' + (c.use_server_dns ? '' : ' text-muted-cc') +
+                            '" aria-hidden="true"></i>' +
+                            '<span class="cc-chip-body">' +
+                                '<span class="cc-chip-k">' + wgEscapeHtml(wgT('helper.dns_section_lbl')) + '</span>' +
+                                '<span class="cc-chip-val">' + wgEscapeHtml(dnsChipTxt) + '</span></span></span>' +
+                        (c.additional_notes ? '<span class="cc-chip cc-chip-wide"><i class="fas fa-file-alt" aria-hidden="true"></i>' +
+                            '<span class="cc-chip-body">' +
+                                '<span class="cc-chip-k">' + wgEscapeHtml(wgT('helper.notes_inline_lbl')) + '</span>' +
+                                '<span class="cc-chip-val">' + wgEscapeHtml(c.additional_notes) + '</span></span></span>' : '') +
                     '</div>' +
                 '</div>' +
                 '<div class="cc-body">' +

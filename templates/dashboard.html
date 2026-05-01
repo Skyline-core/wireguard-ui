@@ -15,6 +15,8 @@
 .wg-pane{background:#1e1e1e;border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:14px 16px}
 .wg-pane h3{font-size:13px;margin:0 0 12px;display:flex;align-items:center;gap:8px;justify-content:space-between}
 .wg-mini-badge{font-size:10px;color:#9e9e9e;background:#252525;padding:3px 8px;border-radius:8px;font-weight:600}
+.wg-mini-badge.wg-srv-status--active{color:#66BB6A;background:rgba(102,187,106,.12)}
+.wg-mini-badge.wg-srv-status--inactive{color:#EF5350;background:rgba(239,83,80,.14)}
 .wg-peer-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06);}
 .wg-peer-row:last-child{border-bottom:0}
 .wg-peer-meta{display:flex;align-items:flex-start;gap:10px}
@@ -111,7 +113,7 @@
         </div>
         <div>
           <div class="wg-pane" style="margin-bottom:14px;">
-            <h3><span>{{ tr .UILang "dash.srv_title" }}</span><span class="wg-mini-badge" style="{{if .serverActive}}color:#66BB6A;background:rgba(102,187,106,.12);{{end}}">{{if .serverActive}}{{ tr .UILang "dash.srv_active" }}{{else}}{{ tr .UILang "dash.srv_inactive" }}{{end}}</span></h3>
+            <h3><span>{{ tr .UILang "dash.srv_title" }}</span><span class="wg-mini-badge {{if .serverActive}}wg-srv-status--active{{else}}wg-srv-status--inactive{{end}}">{{if .serverActive}}{{ tr .UILang "dash.srv_active" }}{{else}}{{ tr .UILang "dash.srv_inactive" }}{{end}}</span></h3>
             {{ if .serverSummary.Interface }}
               <dl class="wg-srv-mini">
               <dt>{{ tr .UILang "dash.srv_iface_port" }}</dt>

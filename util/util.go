@@ -581,8 +581,8 @@ func GetSubnetRangesString() string {
 	return strings.TrimSpace(strB.String())
 }
 
-// WriteWireGuardServerConfig to write Wireguard server config. e.g. wg0.conf
-func WriteWireGuardServerConfig(tmplDir fs.FS, serverConfig model.Server, clientDataList []model.ClientData, usersList []model.User, globalSettings model.GlobalSetting) error {
+// WriteWireGuardServerConfig renders wg.conf template. When outputConfPath is empty, globalSettings.ConfigFilePath is used.
+func WriteWireGuardServerConfig(tmplDir fs.FS, serverConfig model.Server, clientDataList []model.ClientData, usersList []model.User, globalSettings model.GlobalSetting, outputConfPath string) error {
 	var tmplWireguardConf string
 
 	// if set, read wg.conf template from WgConfTemplate
@@ -616,8 +616,13 @@ func WriteWireGuardServerConfig(tmplDir fs.FS, serverConfig model.Server, client
 		return err
 	}
 
+	target := strings.TrimSpace(outputConfPath)
+	if target == "" {
+		target = strings.TrimSpace(globalSettings.ConfigFilePath)
+	}
+
 	// write config file to disk
-	f, err := os.Create(globalSettings.ConfigFilePath)
+	f, err := os.Create(target)
 	if err != nil {
 		return err
 	}
