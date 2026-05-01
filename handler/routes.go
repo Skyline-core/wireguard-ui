@@ -1,10 +1,15 @@
 package handler
 
 import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	htemplate "html/template"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -14,16 +19,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/sessions"
 	"github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/gommon/log"
 	"github.com/rs/xid"
 	"github.com/skip2/go-qrcode"
-	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/ngoduykhanh/wireguard-ui/emailer"
+	"github.com/ngoduykhanh/wireguard-ui/locale"
 	"github.com/ngoduykhanh/wireguard-ui/model"
 	"github.com/ngoduykhanh/wireguard-ui/store"
 	"github.com/ngoduykhanh/wireguard-ui/telegram"
@@ -31,6 +35,129 @@ import (
 )
 
 var usernameRegexp = regexp.MustCompile("^\\w[\\w\\-.]*$")
+var downloadNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+// ensureCanDemote returns an error if stripping admin would leave zero active administrators.
+func ensureCanDemote(db store.IStore, adminUsername string) error {
+	target, err := db.GetUserByName(adminUsername)
+	if err != nil {
+		return err
+	}
+	if !target.Admin {
+		return nil
+	}
+	users, err := db.GetUsers()
+	if err != nil {
+		return err
+	}
+	others := 0
+	for _, u := range users {
+		if u.Username == adminUsername {
+			continue
+		}
+		if u.Admin && !u.Disabled {
+			others++
+		}
+	}
+	if others < 1 {
+		return fmt.Errorf("cannot remove last administrator")
+	}
+	return nil
+}
+
+// ensureLeavingActiveAdminWhenDisabling forbids disabling the last remaining active administrator.
+func ensureLeavingActiveAdminWhenDisabling(db store.IStore, targetUsername string) error {
+	target, err := db.GetUserByName(targetUsername)
+	if err != nil {
+		return err
+	}
+	if !target.Admin || target.Disabled {
+		return nil
+	}
+	users, err := db.GetUsers()
+	if err != nil {
+		return err
+	}
+	others := 0
+	for _, u := range users {
+		if u.Username == targetUsername {
+			continue
+		}
+		if u.Admin && !u.Disabled {
+			others++
+		}
+	}
+	if others < 1 {
+		return fmt.Errorf("debe haber al menos otro administrador activo antes de deshabilitar a este usuario")
+	}
+	return nil
+}
+
+type passkeyListItem struct {
+	CredentialID string `json:"credential_id"`
+	Name         string `json:"name"`
+	Fingerprint  string `json:"fingerprint"`
+}
+
+type userListItem struct {
+	Username    string            `json:"username"`
+	DisplayName string            `json:"display_name"`
+	Email       string            `json:"email"`
+	Admin       bool              `json:"admin"`
+	Disabled    bool              `json:"disabled"`
+	Passkeys    []passkeyListItem `json:"passkeys"`
+}
+
+func passkeyFingerprint(pub []byte) string {
+	if len(pub) == 0 {
+		return "—"
+	}
+	h := sha256.Sum256(pub)
+	parts := make([]string, 0, 8)
+	for i := 0; i < 8 && i < len(h); i++ {
+		parts = append(parts, fmt.Sprintf("%02X", h[i]))
+	}
+	return strings.Join(parts, ":")
+}
+
+func buildPasskeyList(u model.User) []passkeyListItem {
+	pks := make([]passkeyListItem, 0, len(u.Passkeys))
+	for _, c := range u.Passkeys {
+		idKey := base64.RawURLEncoding.EncodeToString(c.ID)
+		nm := ""
+		if u.PasskeyLabels != nil {
+			nm = strings.TrimSpace(u.PasskeyLabels[idKey])
+		}
+		if nm == "" {
+			nm = "Passkey"
+		}
+		pks = append(pks, passkeyListItem{
+			CredentialID: idKey,
+			Name:         nm,
+			Fingerprint:  passkeyFingerprint(c.PublicKey),
+		})
+	}
+	return pks
+}
+
+func buildUserList(users []model.User) []userListItem {
+	out := make([]userListItem, 0, len(users))
+	for _, u := range users {
+		dn := strings.TrimSpace(u.DisplayName)
+		if dn == "" {
+			dn = u.Username
+		}
+		out = append(out, userListItem{
+			Username:    u.Username,
+			DisplayName: dn,
+			Email:       strings.TrimSpace(u.Email),
+			Admin:       u.Admin,
+			Disabled:    u.Disabled,
+			Passkeys:    buildPasskeyList(u),
+		})
+	}
+	return out
+}
 
 // Health check handler
 func Health() echo.HandlerFunc {
@@ -49,9 +176,83 @@ func Favicon() echo.HandlerFunc {
 }
 
 // LoginPage handler
-func LoginPage() echo.HandlerFunc {
+func LoginPage(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		return c.Render(http.StatusOK, "login.html", map[string]interface{}{})
+		gs, _ := db.GetGlobalSettings()
+		uilang := locale.Normalize(gs.UILanguage)
+		st := buildPublicLoginWGStatus(db, c, uilang)
+		return c.Render(http.StatusOK, "login.html", map[string]interface{}{
+			"passkeysEnabled":  gs.TOTPEnabled,
+			"globalSettings":   gs,
+			"UILang":           uilang,
+			"WGMsgJSON":        locale.JSONForHTML(uilang),
+			"loginStatusLine":  st.Message,
+			"loginStatusState": st.State,
+		})
+	}
+}
+
+// publicLoginWGStatusResp is returned by GET /api/public/login-wg-status (no auth) and used for the login banner.
+type publicLoginWGStatusResp struct {
+	InterfaceUp bool   `json:"interface_up"`
+	Iface       string `json:"iface"`
+	ListenPort  int    `json:"listen_port"`
+	Message     string `json:"message"`
+	State       string `json:"state"` // active | inactive | unknown
+}
+
+func buildPublicLoginWGStatus(db store.IStore, c echo.Context, uiLang string) publicLoginWGStatusResp {
+	gs, _ := db.GetGlobalSettings()
+	lang := locale.Normalize(uiLang)
+	srv, errSrv := db.GetServer()
+	iface := util.WireGuardIfaceBasename(gs.ConfigFilePath)
+	port := 51820
+	if errSrv == nil && srv.Interface != nil && srv.Interface.ListenPort > 0 {
+		port = srv.Interface.ListenPort
+	}
+	devicesVm, wgErrMsg, dbgErr := GatherWireGuardStatusDevices(db, c)
+	if dbgErr != nil {
+		return publicLoginWGStatusResp{
+			Iface: iface, ListenPort: port,
+			State:   "unknown",
+			Message: fmt.Sprintf(locale.T(lang, "login.status.unavailable"), iface, port),
+		}
+	}
+	if wgErrMsg != "" {
+		return publicLoginWGStatusResp{
+			Iface: iface, ListenPort: port,
+			State:   "unknown",
+			Message: fmt.Sprintf(locale.T(lang, "login.status.no_wg_read"), iface, port),
+		}
+	}
+	up := false
+	for _, d := range devicesVm {
+		if d.Name == iface {
+			up = true
+			break
+		}
+	}
+	if up {
+		return publicLoginWGStatusResp{
+			Iface: iface, ListenPort: port,
+			InterfaceUp: true, State: "active",
+			Message: fmt.Sprintf(locale.T(lang, "login.status.active"), iface, port),
+		}
+	}
+	return publicLoginWGStatusResp{
+		Iface: iface, ListenPort: port,
+		State:   "inactive",
+		Message: fmt.Sprintf(locale.T(lang, "login.status.inactive"), iface, port),
+	}
+}
+
+// PublicLoginWireguardStatus exposes kernel WG presence for the login page (polling), without authentication.
+func PublicLoginWireguardStatus(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		gs, _ := db.GetGlobalSettings()
+		uilang := locale.Normalize(gs.UILanguage)
+		st := buildPublicLoginWGStatus(db, c, uilang)
+		return c.JSON(http.StatusOK, st)
 	}
 }
 
@@ -68,6 +269,7 @@ func Login(db store.IStore) echo.HandlerFunc {
 		username := data["username"].(string)
 		password := data["password"].(string)
 		rememberMe := data["rememberMe"].(bool)
+		globalSettings, _ := db.GetGlobalSettings()
 
 		if !usernameRegexp.MatchString(username) {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
@@ -93,42 +295,12 @@ func Login(db store.IStore) echo.HandlerFunc {
 		}
 
 		if userCorrect && passwordCorrect {
-			ageMax := 0
-			if rememberMe {
-				ageMax = 86400 * 7
+			if dbuser.Disabled {
+				return c.JSON(http.StatusUnauthorized, jsonHTTPResponse{false, "Cuenta deshabilitada"})
 			}
-
-			cookiePath := util.GetCookiePath()
-
-			sess, _ := session.Get("session", c)
-			sess.Options = &sessions.Options{
-				Path:     cookiePath,
-				MaxAge:   ageMax,
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
+			if err := setLoginSession(c, dbuser, rememberMe, globalSettings.SessionTimeoutMinutes); err != nil {
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, fmt.Sprintf("Cannot set session: %v", err)})
 			}
-
-			// set session_token
-			tokenUID := xid.New().String()
-			now := time.Now().UTC().Unix()
-			sess.Values["username"] = dbuser.Username
-			sess.Values["user_hash"] = util.GetDBUserCRC32(dbuser)
-			sess.Values["admin"] = dbuser.Admin
-			sess.Values["session_token"] = tokenUID
-			sess.Values["max_age"] = ageMax
-			sess.Values["created_at"] = now
-			sess.Values["updated_at"] = now
-			sess.Save(c.Request(), c.Response())
-
-			// set session_token in cookie
-			cookie := new(http.Cookie)
-			cookie.Name = "session_token"
-			cookie.Path = cookiePath
-			cookie.Value = tokenUID
-			cookie.MaxAge = ageMax
-			cookie.HttpOnly = true
-			cookie.SameSite = http.SameSiteLaxMode
-			c.SetCookie(cookie)
 
 			return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Logged in successfully"})
 		}
@@ -137,7 +309,7 @@ func Login(db store.IStore) echo.HandlerFunc {
 	}
 }
 
-// GetUsers handler return a JSON list of all users
+// GetUsers returns a sanitized user list (no password material) for the admin UI.
 func GetUsers(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		usersList, err := db.GetUsers()
@@ -146,8 +318,7 @@ func GetUsers(db store.IStore) echo.HandlerFunc {
 				false, fmt.Sprintf("Cannot get user list: %v", err),
 			})
 		}
-
-		return c.JSON(http.StatusOK, usersList)
+		return c.JSON(http.StatusOK, buildUserList(usersList))
 	}
 }
 
@@ -168,8 +339,29 @@ func GetUser(db store.IStore) echo.HandlerFunc {
 		if err != nil {
 			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
 		}
+		userData.Password = ""
+		userData.PasswordHash = ""
 
 		return c.JSON(http.StatusOK, userData)
+	}
+}
+
+// GetCurrentUserPasskeys returns only the passkeys metadata for current logged-in user.
+func GetCurrentUserPasskeys(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		un := currentUser(c)
+		if !usernameRegexp.MatchString(un) {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
+		}
+		u, err := db.GetUserByName(un)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"status":   true,
+			"username": u.Username,
+			"passkeys": buildPasskeyList(u),
+		})
 	}
 }
 
@@ -182,19 +374,25 @@ func Logout() echo.HandlerFunc {
 }
 
 // LoadProfile to load user information
-func LoadProfile() echo.HandlerFunc {
+func LoadProfile(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		return c.Render(http.StatusOK, "profile.html", map[string]interface{}{
-			"baseData": model.BaseData{Active: "profile", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+		gs, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gs.UILanguage)
+		return renderShell(c, db, "profile.html", map[string]interface{}{
+			"baseData":      model.BaseData{Active: "profile", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle": locale.T(lang, "profile.page_sub"),
 		})
 	}
 }
 
 // UsersSettings handler
-func UsersSettings() echo.HandlerFunc {
+func UsersSettings(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		return c.Render(http.StatusOK, "users_settings.html", map[string]interface{}{
-			"baseData": model.BaseData{Active: "users-settings", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+		gs, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gs.UILanguage)
+		return renderShell(c, db, "users_settings.html", map[string]interface{}{
+			"baseData":      model.BaseData{Active: "users-settings", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle": locale.T(lang, "users.page_sub"),
 		})
 	}
 }
@@ -209,10 +407,12 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
 		}
 
-		username := data["username"].(string)
-		password := data["password"].(string)
-		previousUsername := data["previous_username"].(string)
-		admin := data["admin"].(bool)
+		username, _ := data["username"].(string)
+		password, _ := data["password"].(string)
+		previousUsername, _ := data["previous_username"].(string)
+		admin, _ := data["admin"].(bool)
+		displayName, _ := data["display_name"].(string)
+		email, _ := data["email"].(string)
 
 		if !isAdmin(c) && (previousUsername != currentUser(c)) {
 			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "Manager cannot access other user data"})
@@ -231,11 +431,13 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, err.Error()})
 		}
 
+		user.DisplayName = strings.TrimSpace(displayName)
+		user.Email = strings.TrimSpace(email)
+
 		if username == "" || !usernameRegexp.MatchString(username) {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
-		} else {
-			user.Username = username
 		}
+		user.Username = username
 
 		if username != previousUsername {
 			_, err := db.GetUserByName(username)
@@ -244,7 +446,8 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 			}
 		}
 
-		if password != "" {
+		passwordChanged := strings.TrimSpace(password) != ""
+		if passwordChanged {
 			hash, err := util.HashPassword(password)
 			if err != nil {
 				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
@@ -253,6 +456,11 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 		}
 
 		if previousUsername != currentUser(c) {
+			if !admin && user.Admin {
+				if err := ensureCanDemote(db, previousUsername); err != nil {
+					return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
+				}
+			}
 			user.Admin = admin
 		}
 
@@ -265,6 +473,14 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 		log.Infof("Updated user information successfully")
 
 		if previousUsername == currentUser(c) {
+			if passwordChanged {
+				clearSession(c)
+				return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
+					Status:         true,
+					Message:        "Contraseña actualizada. Vuelve a iniciar sesión.",
+					Reauthenticate: true,
+				})
+			}
 			setUser(c, user.Username, user.Admin, util.GetDBUserCRC32(user))
 		}
 
@@ -283,14 +499,21 @@ func CreateUser(db store.IStore) echo.HandlerFunc {
 		}
 
 		var user model.User
-		username := data["username"].(string)
-		password := data["password"].(string)
-		admin := data["admin"].(bool)
+		username, _ := data["username"].(string)
+		password, _ := data["password"].(string)
+		admin, _ := data["admin"].(bool)
+		displayName, _ := data["display_name"].(string)
+		email, _ := data["email"].(string)
 
 		if username == "" || !usernameRegexp.MatchString(username) {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
-		} else {
-			user.Username = username
+		}
+		user.Username = username
+		user.DisplayName = strings.TrimSpace(displayName)
+		user.Email = strings.TrimSpace(email)
+
+		if strings.TrimSpace(password) == "" {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide an initial password"})
 		}
 
 		{
@@ -327,7 +550,7 @@ func RemoveUser(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
 		}
 
-		username := data["username"].(string)
+		username, _ := data["username"].(string)
 
 		if !usernameRegexp.MatchString(username) {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
@@ -336,7 +559,13 @@ func RemoveUser(db store.IStore) echo.HandlerFunc {
 		if username == currentUser(c) {
 			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "User cannot delete itself"})
 		}
-		// delete user from database
+		tu, err := db.GetUserByName(username)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
+		}
+		if tu.Admin {
+			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "Cannot delete administrator accounts"})
+		}
 
 		if err := db.DeleteUser(username); err != nil {
 			log.Error("Cannot delete user: ", err)
@@ -346,6 +575,132 @@ func RemoveUser(db store.IStore) echo.HandlerFunc {
 		log.Infof("Removed user: %s", username)
 
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "User removed"})
+	}
+}
+
+// SetUserAdmin toggles administrator role (admin-only; cannot demote self or last admin).
+func SetUserAdmin(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var body struct {
+			Username string `json:"username"`
+			Admin    bool   `json:"admin"`
+		}
+		if err := json.NewDecoder(c.Request().Body).Decode(&body); err != nil {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
+		}
+		target := strings.TrimSpace(body.Username)
+		if target == "" || !usernameRegexp.MatchString(target) {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
+		}
+		u, err := db.GetUserByName(target)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
+		}
+		me := currentUser(c)
+		if target == me && !body.Admin {
+			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "Cannot remove administrator role from yourself"})
+		}
+		if !body.Admin && u.Admin {
+			if err := ensureCanDemote(db, target); err != nil {
+				return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
+			}
+		}
+		u.Admin = body.Admin
+		if err := db.SaveUser(u); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+		if target == me {
+			setUser(c, u.Username, u.Admin, util.GetDBUserCRC32(u))
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "User role updated"})
+	}
+}
+
+// SetUserDisabled toggles suspended / disabled login for a user (admin-only).
+func SetUserDisabled(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var body struct {
+			Username string `json:"username"`
+			Disabled bool   `json:"disabled"`
+		}
+		if err := json.NewDecoder(c.Request().Body).Decode(&body); err != nil {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
+		}
+		target := strings.TrimSpace(body.Username)
+		if target == "" || !usernameRegexp.MatchString(target) {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
+		}
+		u, err := db.GetUserByName(target)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
+		}
+		me := currentUser(c)
+		if !body.Disabled {
+			u.Disabled = false
+			if err := db.SaveUser(u); err != nil {
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+			}
+			if target == me {
+				setUser(c, u.Username, u.Admin, util.GetDBUserCRC32(u))
+			}
+			return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Usuario habilitado"})
+		}
+		if u.Disabled {
+			return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Sin cambios"})
+		}
+		if err := ensureLeavingActiveAdminWhenDisabling(db, target); err != nil {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
+		}
+		u.Disabled = true
+		if err := db.SaveUser(u); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+		if target == me {
+			clearSession(c)
+			return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
+				Status:         true,
+				Message:        "Tu cuenta fue deshabilitada. Vuelve a iniciar sesión cuando un administrador te reactive.",
+				Reauthenticate: true,
+			})
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Usuario deshabilitado"})
+	}
+}
+
+// RevokeUserSessions bumps AuthEpoch to invalidate cookies for another user without disabling the account (admin-only).
+func RevokeUserSessions(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var body struct {
+			Username string `json:"username"`
+		}
+		if err := json.NewDecoder(c.Request().Body).Decode(&body); err != nil {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
+		}
+		target := strings.TrimSpace(body.Username)
+		if target == "" || !usernameRegexp.MatchString(target) {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
+		}
+		u, err := db.GetUserByName(target)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
+		}
+		if u.Disabled {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "El usuario está deshabilitado; no tiene sesiones activas válidas"})
+		}
+		u.AuthEpoch++
+		if err := db.SaveUser(u); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+		me := currentUser(c)
+		if target == me {
+			clearSession(c)
+			return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
+				Status:         true,
+				Message:        "Sesión revocada. Vuelve a iniciar sesión.",
+				Reauthenticate: true,
+			})
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Sesiones del usuario cerradas"})
 	}
 }
 
@@ -359,9 +714,184 @@ func WireGuardClients(db store.IStore) echo.HandlerFunc {
 			})
 		}
 
-		return c.Render(http.StatusOK, "clients.html", map[string]interface{}{
-			"baseData":       model.BaseData{Active: "", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+		globalSettings, _ := db.GetGlobalSettings()
+
+		return renderShell(c, db, "clients.html", map[string]interface{}{
+			"baseData":       model.BaseData{Active: "clients", CurrentUser: currentUser(c), Admin: isAdmin(c)},
 			"clientDataList": clientDataList,
+			"globalSettings": globalSettings,
+			"page_subtitle":  "Gestión de peers y configuraciones",
+		})
+	}
+}
+
+// Dashboard main summary page (mock shell).
+func Dashboard(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		clientDataList, err := db.GetClients(true)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, fmt.Sprintf("Cannot get client list: %v", err)})
+		}
+		for i, clientData := range clientDataList {
+			clientDataList[i] = util.FillClientSubnetRange(clientData)
+		}
+
+		devicesVm, wgErr, dberr := GatherWireGuardStatusDevices(db, c)
+		if dberr != nil {
+			return renderShellErr(c, db, http.StatusInternalServerError, "dashboard.html", map[string]interface{}{
+				"baseData":      model.BaseData{Active: "dashboard", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+				"page_subtitle": "Resumen del sistema",
+				"error":         dberr.Error(),
+			})
+		}
+
+		onlineByPub := map[string]bool{}
+		trafficByPub := map[string]PeerTrafficRow{}
+		var recvTotal, xmitTotal int64
+		if wgErr == "" {
+			for _, d := range devicesVm {
+				for _, p := range d.Peers {
+					recvTotal += p.ReceivedBytes
+					xmitTotal += p.TransmitBytes
+					if p.Connected && p.PublicKey != "" {
+						onlineByPub[p.PublicKey] = true
+					}
+					if p.PublicKey != "" {
+						trafficByPub[p.PublicKey] = PeerTrafficRow{
+							Rx: p.ReceivedBytes,
+							Tx: p.TransmitBytes,
+						}
+					}
+				}
+			}
+		}
+
+		totalPeers := len(clientDataList)
+		enabledPeers := 0
+		onlineClients := 0
+		for _, cd := range clientDataList {
+			if cd.Client == nil {
+				continue
+			}
+			if cd.Client.Enabled {
+				enabledPeers++
+			}
+			if cd.Client.Enabled && onlineByPub[cd.Client.PublicKey] {
+				onlineClients++
+			}
+		}
+		offPeers := enabledPeers - onlineClients
+		if offPeers < 0 {
+			offPeers = 0
+		}
+
+		var recentSorted []model.ClientData
+		for _, cd := range clientDataList {
+			if cd.Client != nil {
+				recentSorted = append(recentSorted, cd)
+			}
+		}
+		sort.SliceStable(recentSorted, func(i, j int) bool {
+			return recentSorted[i].Client.UpdatedAt.After(recentSorted[j].Client.UpdatedAt)
+		})
+		recentClients := recentSorted
+		if len(recentClients) > 10 {
+			recentClients = recentClients[:10]
+		}
+
+		server, _ := db.GetServer()
+		globalSettings, _ := db.GetGlobalSettings()
+		serverActive := wgErr == "" && len(devicesVm) > 0
+
+		return renderShell(c, db, "dashboard.html", map[string]interface{}{
+			"baseData":            model.BaseData{Active: "dashboard", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle":       "Resumen del sistema",
+			"clientDataList":      clientDataList,
+			"recentClients":       recentClients,
+			"onlinePeerByPubKey":  onlineByPub,
+			"peerTrafficByPubKey": trafficByPub,
+			"devicesVm":           devicesVm,
+			"wgStatusError":       wgErr,
+			"totalPeers":          totalPeers,
+			"enabledPeers":        enabledPeers,
+			"onlineCount":         onlineClients,
+			"offlineApprox":       offPeers,
+			"bytesReceived":       recvTotal,
+			"bytesTransmitted":    xmitTotal,
+			"wgOK":                wgErr == "",
+			"serverActive":        serverActive,
+			"serverSummary":       server,
+			"globalSettings":      globalSettings,
+			"logTailEnvVarHint":   LogsTailEnvVarName,
+		})
+	}
+}
+
+// TrafficPage bandwidth-style view using live wg stats plus client names.
+func TrafficPage(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		devicesVm, wgErr, dberr := GatherWireGuardStatusDevices(db, c)
+		if dberr != nil {
+			return renderShellErr(c, db, http.StatusInternalServerError, "traffic.html", map[string]interface{}{
+				"baseData":      model.BaseData{Active: "traffic", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+				"page_subtitle": "Monitoreo de ancho de banda",
+				"error":         dberr.Error(),
+			})
+		}
+
+		var recvTotal, xmitTotal int64
+		for _, d := range devicesVm {
+			for _, p := range d.Peers {
+				recvTotal += p.ReceivedBytes
+				xmitTotal += p.TransmitBytes
+			}
+		}
+
+		return renderShell(c, db, "traffic.html", map[string]interface{}{
+			"baseData":         model.BaseData{Active: "traffic", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle":    "Monitoreo de ancho de banda",
+			"devices":          devicesVm,
+			"error":            wgErr,
+			"bytesReceived":    recvTotal,
+			"bytesTransmitted": xmitTotal,
+		})
+	}
+}
+
+// LogsPage shows last lines from WGUI_LOG_TAIL_PATH file if configured.
+func LogsPage(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		globalSettings, _ := db.GetGlobalSettings()
+		iface := util.WireGuardIfaceBasename(globalSettings.ConfigFilePath)
+		systemSections := ReadSystemLogSections(iface)
+		lines := ReadLogTailLines(400)
+		return renderShell(c, db, "logs.html", map[string]interface{}{
+			"baseData":       model.BaseData{Active: "logs", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle":  "Registros en tiempo real de WireGuard / aplicación",
+			"ifaceName":      iface,
+			"systemSections": systemSections,
+			"logLines":       lines,
+			"logTailUnset":   len(lines) == 0,
+			"logEnvHint":     LogsTailEnvVarName,
+		})
+	}
+}
+
+// APISystemLogs returns fresh log sections for the Logs page when "Logs" live monitoring is enabled.
+func APISystemLogs(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		globalSettings, _ := db.GetGlobalSettings()
+		if !globalSettings.RealtimeStatsEnabled {
+			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "Monitoreo de logs desactivado en configuración"})
+		}
+		iface := util.WireGuardIfaceBasename(globalSettings.ConfigFilePath)
+		sections := ReadSystemLogSections(iface)
+		fileLines := ReadLogTailLines(400)
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"sections":       sections,
+			"log_lines":      fileLines,
+			"log_tail_unset": len(fileLines) == 0,
+			"iface_name":     iface,
 		})
 	}
 }
@@ -804,6 +1334,76 @@ func DownloadClient(db store.IStore) echo.HandlerFunc {
 	}
 }
 
+// DownloadAllClientsZip exports all peer configs as a single zip.
+func DownloadAllClientsZip(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		clientDataList, err := db.GetClients(false)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+		if len(clientDataList) == 0 {
+			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "No peers found"})
+		}
+
+		server, err := db.GetServer()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+		globalSettings, err := db.GetGlobalSettings()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		usedNames := map[string]int{}
+
+		for _, cd := range clientDataList {
+			if cd.Client == nil {
+				continue
+			}
+			cfg := util.BuildClientConfig(*cd.Client, server, globalSettings)
+			base := strings.TrimSpace(cd.Client.Name)
+			if base == "" {
+				base = "peer-" + cd.Client.ID
+			}
+			base = downloadNameSanitizer.ReplaceAllString(base, "_")
+			if base == "" {
+				base = "peer-" + cd.Client.ID
+			}
+			base = strings.Trim(base, "._- ")
+			if base == "" {
+				base = "peer-" + cd.Client.ID
+			}
+
+			n := usedNames[base]
+			usedNames[base] = n + 1
+			name := base
+			if n > 0 {
+				name = fmt.Sprintf("%s_%d", base, n+1)
+			}
+
+			w, err := zw.Create(name + ".conf")
+			if err != nil {
+				_ = zw.Close()
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+			}
+			if _, err := w.Write([]byte(cfg)); err != nil {
+				_ = zw.Close()
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+			}
+		}
+
+		if err := zw.Close(); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+
+		filename := fmt.Sprintf("wireguard-peers-%s.zip", time.Now().Format("20060102-150405"))
+		c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf("attachment; filename=%s", filename))
+		return c.Blob(http.StatusOK, "application/zip", buf.Bytes())
+	}
+}
+
 // RemoveClient handler
 func RemoveClient(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -834,10 +1434,36 @@ func WireGuardServer(db store.IStore) echo.HandlerFunc {
 			log.Error("Cannot get server config: ", err)
 		}
 
-		return c.Render(http.StatusOK, "server.html", map[string]interface{}{
+		globalSettings, gsErr := db.GetGlobalSettings()
+		if gsErr != nil {
+			log.Warn("Cannot get global settings for servidor page: ", gsErr)
+		}
+
+		listenUDP := 0
+		if server.Interface != nil {
+			listenUDP = server.Interface.ListenPort
+		}
+
+		ifaceName := util.WireGuardIfaceBasename(globalSettings.ConfigFilePath)
+		devicesVm, wgErr, dbgErr := GatherWireGuardStatusDevices(db, c)
+		if dbgErr != nil {
+			log.Warn(" wg status unavailable: ", dbgErr)
+			wgErr = dbgErr.Error()
+			devicesVm = nil
+		}
+		banner := BuildServerBannerVM(ifaceName, devicesVm, wgErr, listenUDP, util.HostUptimeApprox())
+		dnsCsv := strings.Join(globalSettings.DNSServers, ", ")
+
+		return renderShell(c, db, "server.html", map[string]interface{}{
 			"baseData":        model.BaseData{Active: "wg-server", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle":   fmt.Sprintf("Configuración de %s", ifaceName),
 			"serverInterface": server.Interface,
 			"serverKeyPair":   server.KeyPair,
+			"globalSettings":  globalSettings,
+			"wgIfaceName":     ifaceName,
+			"dnsCsv":          dnsCsv,
+			"serverBanner":    banner,
+			"allowWgQuick":    util.LookupEnvOrBool(util.AllowWgQuickCtlEnvVar, false),
 		})
 	}
 }
@@ -899,109 +1525,51 @@ func GlobalSettings(db store.IStore) echo.HandlerFunc {
 			log.Error("Cannot get global settings: ", err)
 		}
 
-		return c.Render(http.StatusOK, "global_settings.html", map[string]interface{}{
+		dnsSrv := globalSettings.DNSServers
+		if dnsSrv == nil {
+			dnsSrv = []string{}
+		}
+		dnsJSON, errMarshal := json.Marshal(dnsSrv)
+		if errMarshal != nil || len(dnsJSON) == 0 {
+			dnsJSON = []byte("[]")
+		}
+
+		lang := locale.Normalize(globalSettings.UILanguage)
+		return renderShell(c, db, "global_settings.html", map[string]interface{}{
 			"baseData":       model.BaseData{Active: "global-settings", CurrentUser: currentUser(c), Admin: isAdmin(c)},
 			"globalSettings": globalSettings,
+			"page_subtitle":  locale.T(lang, "settings.page_sub"),
+			"dnsServersJS":   htemplate.JS(dnsJSON),
 		})
 	}
 }
 
 // Status handler
 func Status(db store.IStore) echo.HandlerFunc {
-	type PeerVM struct {
-		Name              string
-		Email             string
-		PublicKey         string
-		ReceivedBytes     int64
-		TransmitBytes     int64
-		LastHandshakeTime time.Time
-		LastHandshakeRel  time.Duration
-		Connected         bool
-		AllocatedIP       string
-		Endpoint          string
-	}
-
-	type DeviceVM struct {
-		Name  string
-		Peers []PeerVM
-	}
 	return func(c echo.Context) error {
-		wgClient, err := wgctrl.New()
-		if err != nil {
-			return c.Render(http.StatusInternalServerError, "status.html", map[string]interface{}{
-				"baseData": model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-				"error":    err.Error(),
-				"devices":  nil,
+		devicesVm, wgErr, dbErr := GatherWireGuardStatusDevices(db, c)
+		if dbErr != nil {
+			return renderShellErr(c, db, http.StatusInternalServerError, "status.html", map[string]interface{}{
+				"baseData":      model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+				"page_subtitle": "Peers desde wgctrl (detalle tabla)",
+				"error":         dbErr.Error(),
+				"devices":       nil,
+			})
+		}
+		if wgErr != "" {
+			return renderShellErr(c, db, http.StatusInternalServerError, "status.html", map[string]interface{}{
+				"baseData":      model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+				"page_subtitle": "Peers desde wgctrl (detalle tabla)",
+				"error":         wgErr,
+				"devices":       nil,
 			})
 		}
 
-		devices, err := wgClient.Devices()
-		if err != nil {
-			return c.Render(http.StatusInternalServerError, "status.html", map[string]interface{}{
-				"baseData": model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-				"error":    err.Error(),
-				"devices":  nil,
-			})
-		}
-
-		devicesVm := make([]DeviceVM, 0, len(devices))
-		if len(devices) > 0 {
-			m := make(map[string]*model.Client)
-			clients, err := db.GetClients(false)
-			if err != nil {
-				return c.Render(http.StatusInternalServerError, "status.html", map[string]interface{}{
-					"baseData": model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-					"error":    err.Error(),
-					"devices":  nil,
-				})
-			}
-			for i := range clients {
-				if clients[i].Client != nil {
-					m[clients[i].Client.PublicKey] = clients[i].Client
-				}
-			}
-
-			conv := map[bool]int{true: 1, false: 0}
-			for i := range devices {
-				devVm := DeviceVM{Name: devices[i].Name}
-				for j := range devices[i].Peers {
-					var allocatedIPs string
-					for _, ip := range devices[i].Peers[j].AllowedIPs {
-						if len(allocatedIPs) > 0 {
-							allocatedIPs += "</br>"
-						}
-						allocatedIPs += ip.String()
-					}
-					pVm := PeerVM{
-						PublicKey:         devices[i].Peers[j].PublicKey.String(),
-						ReceivedBytes:     devices[i].Peers[j].ReceiveBytes,
-						TransmitBytes:     devices[i].Peers[j].TransmitBytes,
-						LastHandshakeTime: devices[i].Peers[j].LastHandshakeTime,
-						LastHandshakeRel:  time.Since(devices[i].Peers[j].LastHandshakeTime),
-						AllocatedIP:       allocatedIPs,
-					}
-					pVm.Connected = pVm.LastHandshakeRel.Minutes() < 3.
-
-					if isAdmin(c) {
-						pVm.Endpoint = devices[i].Peers[j].Endpoint.String()
-					}
-
-					if _client, ok := m[pVm.PublicKey]; ok {
-						pVm.Name = _client.Name
-						pVm.Email = _client.Email
-					}
-					devVm.Peers = append(devVm.Peers, pVm)
-				}
-				sort.SliceStable(devVm.Peers, func(i, j int) bool { return devVm.Peers[i].Name < devVm.Peers[j].Name })
-				sort.SliceStable(devVm.Peers, func(i, j int) bool { return conv[devVm.Peers[i].Connected] > conv[devVm.Peers[j].Connected] })
-				devicesVm = append(devicesVm, devVm)
-			}
-		}
-
-		return c.Render(http.StatusOK, "status.html", map[string]interface{}{
-			"baseData": model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"devices":  devicesVm,
-			"error":    "",
+		return renderShell(c, db, "status.html", map[string]interface{}{
+			"baseData":      model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle": "Peers desde wgctrl (detalle tabla)",
+			"devices":       devicesVm,
+			"error":         "",
 		})
 	}
 }
@@ -1009,14 +1577,61 @@ func Status(db store.IStore) echo.HandlerFunc {
 // GlobalSettingSubmit handler to update the global settings
 func GlobalSettingSubmit(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		prev, _ := db.GetGlobalSettings()
 		var globalSettings model.GlobalSetting
 		c.Bind(&globalSettings)
+		disabledPasskeys := prev.TOTPEnabled && !globalSettings.TOTPEnabled
+
+		// UI theme: dark by default; "auto" follows prefers-color-scheme in the browser.
+		switch strings.ToLower(strings.TrimSpace(globalSettings.UITheme)) {
+		case "light":
+			globalSettings.UITheme = "light"
+		case "auto":
+			globalSettings.UITheme = "auto"
+		default:
+			globalSettings.UITheme = "dark"
+		}
+
+		// Global settings POST does not include Server-tab flags (ip_forward / DNS force / persist / auto-apply).
+		// Keep previously stored DB values so they are not overwritten with false when saving other fields.
+		globalSettings.IPForwardDesired = prev.IPForwardDesired
+		globalSettings.GlobalDNSOverride = prev.GlobalDNSOverride
+		globalSettings.PersistWgConfOnSave = prev.PersistWgConfOnSave
+		globalSettings.AutoApplyWGOnSave = prev.AutoApplyWGOnSave
+
+		if strings.TrimSpace(globalSettings.EndpointAddress) == "" {
+			globalSettings.EndpointAddress = prev.EndpointAddress
+		}
+		if strings.TrimSpace(globalSettings.ConfigFilePath) == "" {
+			globalSettings.ConfigFilePath = prev.ConfigFilePath
+		}
 
 		// validate the input dns server list
 		if util.ValidateIPAddressList(globalSettings.DNSServers) == false {
 			log.Warnf("Invalid DNS server list input from user: %v", globalSettings.DNSServers)
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Invalid DNS server address"})
 		}
+
+		if util.ValidateMTU(globalSettings.MTU) == false {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "MTU must be 1280..9000 or 0/empty to omit"})
+		}
+
+		// Session timeout — if the client omits the field or sends 0, keep the previous DB value
+		st := globalSettings.SessionTimeoutMinutes
+		if st <= 0 && prev.SessionTimeoutMinutes > 0 {
+			globalSettings.SessionTimeoutMinutes = prev.SessionTimeoutMinutes
+			st = globalSettings.SessionTimeoutMinutes
+		}
+		if st <= 0 {
+			st = 30
+		}
+		if st < 5 {
+			st = 5
+		}
+		if st > 1440 {
+			st = 1440
+		}
+		globalSettings.SessionTimeoutMinutes = st
 
 		globalSettings.UpdatedAt = time.Now().UTC()
 
@@ -1025,9 +1640,40 @@ func GlobalSettingSubmit(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot generate Wireguard key pair"})
 		}
 
+		// Only when this submit runs (save footer), not when toggling off Passkeys without saving yet.
+		if disabledPasskeys {
+			if err := ClearStoredPasskeysForAllUsers(db); err != nil {
+				log.Errorf("clear passkeys after disabling Passkeys: %v", err)
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Ajustes guardados pero no se pudieron borrar las passkeys almacenadas"})
+			}
+		}
+
+		// Keep hashes.json in sync with global_settings.json so /test-hash does not
+		// report spurious pending changes after applying settings from the UI.
+		if err := util.UpdateHashes(db); err != nil {
+			log.Errorf("Cannot update hashes after global settings save: %v", err)
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Saved settings but failed to update pending state"})
+		}
+
 		log.Infof("Updated global settings: %v", globalSettings)
 
-		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Updated global settings successfully"})
+		// Do not logout here: the unified flow POSTs /global-settings then apply-wg-config to the kernel;
+		// logging out would force re-login before re-applying. Instead refresh the current user's session digest.
+		if disabledPasskeys && !util.DisableLogin {
+			if me := currentUser(c); me != "" {
+				if u, err := db.GetUserByName(me); err == nil {
+					sess, _ := session.Get("session", c)
+					delete(sess.Values, sessionPkLoginCredKey)
+					setUser(c, u.Username, u.Admin, util.GetDBUserCRC32(u))
+				}
+			}
+		}
+
+		msg := "Updated global settings successfully"
+		if disabledPasskeys {
+			msg = "Configuración guardada. Passkeys desactivadas y credenciales eliminadas. Puedes aplicar al kernel en el mismo paso."
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, msg})
 	}
 }
 
@@ -1127,51 +1773,247 @@ func SuggestIPAllocation(db store.IStore) echo.HandlerFunc {
 	}
 }
 
-// ApplyServerConfig handler to write config file and restart Wireguard server
+func applyKernelAfterWritingWgConf(configFilePath string, wgQuickRestart bool) error {
+	if wgQuickRestart {
+		if err := util.RestartWgQuick(configFilePath); err != nil {
+			log.Warnf("wg-quick restart after apply failed, trying wg syncconf (unconditional): %v", err)
+			if synErr := util.WgForceSyncConfFromSavedFile(configFilePath); synErr != nil {
+				return fmt.Errorf("WireGuard restart failed (%v) and syncconf fallback failed (%s): %w", err, configFilePath, synErr)
+			}
+			return nil
+		}
+		return nil
+	}
+	if synErr := util.WgSyncConfFromSavedFile(configFilePath); synErr != nil {
+		return fmt.Errorf("config saved but kernel reload failed (%s): %w", configFilePath, synErr)
+	}
+	return nil
+}
+
+func applyWireGuardConfigToDisk(db store.IStore, tmplDir fs.FS, wgQuickRestart bool) error {
+	server, err := db.GetServer()
+	if err != nil {
+		log.Error("Cannot get server config: ", err)
+		return fmt.Errorf("cannot get server config: %w", err)
+	}
+
+	clients, err := db.GetClients(false)
+	if err != nil {
+		log.Error("Cannot get client config: ", err)
+		return fmt.Errorf("cannot get client config: %w", err)
+	}
+
+	users, err := db.GetUsers()
+	if err != nil {
+		log.Error("Cannot get users config: ", err)
+		return fmt.Errorf("cannot get users config: %w", err)
+	}
+
+	settings, err := db.GetGlobalSettings()
+	if err != nil {
+		log.Error("Cannot get global settings: ", err)
+		return fmt.Errorf("cannot get global settings: %w", err)
+	}
+
+	err = util.WriteWireGuardServerConfig(tmplDir, server, clients, users, settings)
+	if err != nil {
+		log.Error("Cannot apply server config: ", err)
+		return err
+	}
+
+	err = util.UpdateHashes(db)
+	if err != nil {
+		log.Error("Cannot update hashes: ", err)
+		return err
+	}
+
+	return applyKernelAfterWritingWgConf(settings.ConfigFilePath, wgQuickRestart)
+}
+
+// ApplyServerConfig writes wg.conf and applies it to the kernel. Optional JSON body:
+//   - Empty body or absent key: try wg-quick restart (down+up); when not allowed or on failure, fall back to wg syncconf.
+//   - {"restart_wireguard":false}: syncconf only (e.g. session/appearance-only changes plus config dump without bringing the iface down).
 func ApplyServerConfig(db store.IStore, tmplDir fs.FS) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		server, err := db.GetServer()
-		if err != nil {
-			log.Error("Cannot get server config: ", err)
-			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot get server config"})
+		restartWG := true
+		body, errRead := io.ReadAll(c.Request().Body)
+		if errRead != nil {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Cannot read request body"})
 		}
-
-		clients, err := db.GetClients(false)
-		if err != nil {
-			log.Error("Cannot get client config: ", err)
-			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot get client config"})
+		if len(bytes.TrimSpace(body)) > 0 {
+			var raw struct {
+				Restart *bool `json:"restart_wireguard"`
+			}
+			if err := json.Unmarshal(body, &raw); err != nil {
+				return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Invalid JSON body"})
+			}
+			if raw.Restart != nil {
+				restartWG = *raw.Restart
+			}
 		}
-
-		users, err := db.GetUsers()
-		if err != nil {
-			log.Error("Cannot get users config: ", err)
-			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot get users config"})
+		log.Infof("ApplyServerConfig: restart_wireguard=%v %s=%v", restartWG, util.AllowWgQuickCtlEnvVar, util.LookupEnvOrBool(util.AllowWgQuickCtlEnvVar, false))
+		if err := applyWireGuardConfigToDisk(db, tmplDir, restartWG); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
 		}
-
-		settings, err := db.GetGlobalSettings()
-		if err != nil {
-			log.Error("Cannot get global settings: ", err)
-			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot get global settings"})
-		}
-
-		// Write config file
-		err = util.WriteWireGuardServerConfig(tmplDir, server, clients, users, settings)
-		if err != nil {
-			log.Error("Cannot apply server config: ", err)
-			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{
-				false, fmt.Sprintf("Cannot apply server config: %v", err),
-			})
-		}
-
-		err = util.UpdateHashes(db)
-		if err != nil {
-			log.Error("Cannot update hashes: ", err)
-			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{
-				false, fmt.Sprintf("Cannot update hashes: %v", err),
-			})
-		}
-
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Applied server config successfully"})
+	}
+}
+
+// wgServerPagePayload matches the Servidor tab combined save POST body (numbers as JSON ints, unlike model.ServerInterface form tags).
+type wgServerPagePayload struct {
+	Addresses           []string `json:"addresses"`
+	ListenPort          int      `json:"listen_port"`
+	PostUp              string   `json:"post_up"`
+	PreDown             string   `json:"pre_down"`
+	PostDown            string   `json:"post_down"`
+	MTU                 int      `json:"mtu"`
+	DNSServersRaw       string   `json:"dns_servers"`
+	IPForwardDesired    bool     `json:"ip_forward_desired"`
+	GlobalDNSOverride   bool     `json:"global_dns_override"`
+	PersistWgConfOnSave bool     `json:"persist_wg_conf_on_save"`
+	AutoApplyWGOnSave   bool     `json:"auto_apply_wg_on_save"`
+}
+
+// WireGuardServerSave stores interface + dns/mtu/options and optionally persists wg.conf to disk + sysctl ipv4 forwarding.
+func WireGuardServerSave(db store.IStore, tmplDir fs.FS) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var payload wgServerPagePayload
+		if err := c.Bind(&payload); err != nil {
+			log.Warn(err)
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, fmt.Sprintf("Invalid request format: %s", err.Error())})
+		}
+
+		if payload.ListenPort < 1 || payload.ListenPort > 65535 {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Listen port must be in range 1..65535"})
+		}
+
+		if util.ValidateServerAddresses(payload.Addresses) == false {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Interface IP address must be in CIDR format"})
+		}
+
+		if util.ValidateMTU(payload.MTU) == false {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "MTU must be 1280..9000 or 0/empty to omit"})
+		}
+
+		srvIf := model.ServerInterface{
+			Addresses:  payload.Addresses,
+			ListenPort: payload.ListenPort,
+			PostUp:     payload.PostUp,
+			PreDown:    payload.PreDown,
+			PostDown:   payload.PostDown,
+			UpdatedAt:  time.Now().UTC(),
+		}
+		if err := db.SaveServerInterface(srvIf); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot save server interface"})
+		}
+
+		gs, err := db.GetGlobalSettings()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot read global settings"})
+		}
+
+		gs.MTU = payload.MTU
+
+		ds := make([]string, 0)
+		for _, p := range strings.Split(payload.DNSServersRaw, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				ds = append(ds, p)
+			}
+		}
+		gs.DNSServers = ds
+		if util.ValidateIPAddressList(gs.DNSServers) == false {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Invalid DNS server address"})
+		}
+
+		gs.IPForwardDesired = payload.IPForwardDesired
+		gs.GlobalDNSOverride = payload.GlobalDNSOverride
+		gs.PersistWgConfOnSave = payload.PersistWgConfOnSave
+		gs.AutoApplyWGOnSave = payload.AutoApplyWGOnSave
+		gs.UpdatedAt = time.Now().UTC()
+
+		if err := db.SaveGlobalSettings(gs); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot save settings"})
+		}
+
+		if err := util.ApplyIPv4ForwardSysctl(gs.IPForwardDesired); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, fmt.Sprintf("sysctl ipv4 forwarding: %s", err.Error())})
+		}
+
+		writeDisk := gs.PersistWgConfOnSave || gs.AutoApplyWGOnSave
+		if writeDisk {
+			if err := applyWireGuardConfigToDisk(db, tmplDir, false); err != nil {
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+			}
+		}
+
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Servidor actualizado"})
+	}
+}
+
+// WireGuardQuickStop runs wg-quick down when WGUI_ALLOW_WG_QUICK=true.
+func WireGuardQuickStop(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		gs, err := db.GetGlobalSettings()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot read global settings"})
+		}
+		if err := util.RunWgQuickDown(gs.ConfigFilePath); err != nil {
+			log.Warn(err)
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Interfaz detenida (wg-quick down)"})
+	}
+}
+
+// WireGuardQuickStart runs wg-quick up when WGUI_ALLOW_WG_QUICK=true.
+func WireGuardQuickStart(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		gs, err := db.GetGlobalSettings()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot read global settings"})
+		}
+		if err := util.RunWgQuickUp(gs.ConfigFilePath); err != nil {
+			log.Warn(err)
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Interfaz iniciada (wg-quick up)"})
+	}
+}
+
+// GetUINavHints returns navbar + shell prefs without a full page reload (badge, Logs, theme, HTML lang).
+func GetUINavHints(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		badge := 0
+		if db != nil && util.HashesChanged(db) {
+			badge = 1
+		}
+		showLogs := false
+		uiTheme := "dark"
+		uiLang := "es"
+		if gs, err := db.GetGlobalSettings(); err == nil {
+			showLogs = gs.RealtimeStatsEnabled
+			ut := strings.ToLower(strings.TrimSpace(gs.UITheme))
+			switch ut {
+			case "", "dark":
+				uiTheme = "dark"
+			case "light":
+				uiTheme = "light"
+			case "auto":
+				uiTheme = "auto"
+			default:
+				uiTheme = "dark"
+			}
+			if ln := strings.ToLower(strings.TrimSpace(gs.UILanguage)); ln == "en" {
+				uiLang = "en"
+			}
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"dashboard_nav_badge": badge,
+			"show_logs_nav":       showLogs,
+			"ui_theme":            uiTheme,
+			"ui_language":         uiLang,
+		})
 	}
 }
 
@@ -1187,10 +2029,11 @@ func GetHashesChanges(db store.IStore) echo.HandlerFunc {
 }
 
 // AboutPage handler
-func AboutPage() echo.HandlerFunc {
+func AboutPage(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		return c.Render(http.StatusOK, "about.html", map[string]interface{}{
-			"baseData": model.BaseData{Active: "about", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+		return renderShell(c, db, "about.html", map[string]interface{}{
+			"baseData":      model.BaseData{Active: "about", CurrentUser: currentUser(c), Admin: isAdmin(c)},
+			"page_subtitle": "Información y versión",
 		})
 	}
 }

@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/sessions"
@@ -11,8 +12,22 @@ import (
 	"github.com/ngoduykhanh/wireguard-ui/util"
 )
 
+// WebAuthn credential ID (RawURLEncoded) used for the current login, if login was via passkey.
+const sessionPkLoginCredKey = "pk_login_cred"
+
+func sessionPasskeyCredentialID(sess *sessions.Session) string {
+	if sess == nil {
+		return ""
+	}
+	s, _ := sess.Values[sessionPkLoginCredKey].(string)
+	return strings.TrimSpace(s)
+}
+
 func ValidSession(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		if util.DisableLogin {
+			return next(c)
+		}
 		if !isValidSession(c) {
 			nextURL := c.Request().URL
 			if nextURL != nil && c.Request().Method == http.MethodGet {
@@ -20,6 +35,11 @@ func ValidSession(next echo.HandlerFunc) echo.HandlerFunc {
 			} else {
 				return c.Redirect(http.StatusTemporaryRedirect, util.BasePath+"/login")
 			}
+		}
+		// Sliding idle timeout: treat this request as last activity for idle expiry.
+		// Do not refresh cookies on /logout: it races with clearSession in the same response.
+		if !strings.HasSuffix(c.Request().URL.Path, "/logout") {
+			touchSessionIdle(c)
 		}
 		return next(c)
 	}
@@ -138,9 +158,50 @@ func getMaxAge(sess *sessions.Session) int {
 	switch typedMaxAge := maxAge.(type) {
 	case int:
 		return typedMaxAge
+	case int32:
+		return int(typedMaxAge)
+	case int64:
+		return int(typedMaxAge)
+	case float64:
+		return int(typedMaxAge)
 	default:
 		return 0
 	}
+}
+
+// touchSessionIdle updates updated_at while session is alive so expires at (last_activity + max_age idle window).
+func touchSessionIdle(c echo.Context) {
+	sess, _ := session.Get("session", c)
+	oldCookie, err := c.Cookie("session_token")
+	if err != nil || sess.Values["session_token"] != oldCookie.Value {
+		return
+	}
+	maxAge := getMaxAge(sess)
+	if maxAge <= 0 {
+		maxAge = 86400
+	}
+	now := time.Now().UTC().Unix()
+	sess.Values["updated_at"] = now
+
+	cookiePath := util.GetCookiePath()
+	sess.Options = &sessions.Options{
+		Path:     cookiePath,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if err := sess.Save(c.Request(), c.Response()); err != nil {
+		return
+	}
+
+	cookie := new(http.Cookie)
+	cookie.Name = "session_token"
+	cookie.Path = cookiePath
+	cookie.Value = oldCookie.Value
+	cookie.MaxAge = maxAge
+	cookie.HttpOnly = true
+	cookie.SameSite = http.SameSiteLaxMode
+	c.SetCookie(cookie)
 }
 
 // Get a timestamp in seconds of the time the session was created
@@ -225,15 +286,20 @@ func setUser(c echo.Context, username string, admin bool, userCRC32 uint32) {
 // clearSession to remove current session
 func clearSession(c echo.Context) {
 	sess, _ := session.Get("session", c)
+	delete(sess.Values, sessionPkLoginCredKey)
 	sess.Values["username"] = ""
 	sess.Values["user_hash"] = 0
 	sess.Values["admin"] = false
 	sess.Values["session_token"] = ""
 	sess.Values["max_age"] = -1
-	sess.Options.MaxAge = -1
-	sess.Save(c.Request(), c.Response())
-
 	cookiePath := util.GetCookiePath()
+	sess.Options = &sessions.Options{
+		Path:     cookiePath,
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	sess.Save(c.Request(), c.Response())
 
 	cookie, err := c.Cookie("session_token")
 	if err != nil {

@@ -2,16 +2,46 @@
 
 # wireguard-ui
 
+## WireGuard UI v2
+
+This repository ships **version 2** of the WireGuard UI: an updated shell-style layout, richer monitoring and administration pages, Passkeys (WebAuthn) support, bilingual UI (English / Spanish via `locale/en.json` and `locale/es.json`), and extended optional OS integration (sysctl, `wg-quick` / `wg syncconf`, log tail) while keeping the same core purpose as the upstream project—manage peers, generate configs, and distribute them by QR, file, email, or Telegram.
+
+**Notes**
+
+- **Building from source**: run `./prepare_assets.sh` before `go build` when templates or static assets change (see **Build** below).
+- **Changing UI language**: set **Language** under **Global settings**, save, click **Apply config** in the toolbar, then **reload the page** so server-rendered templates and client-side `WG_T` strings refresh.
+
+---
+
 A web user interface to manage your WireGuard setup.
 
 ## Features
 
-- Friendly UI
-- Authentication
-- Manage extra client information (name, email, etc.)
-- Retrieve client config using QR code / file / email / Telegram
+### Classic capabilities (upstream parity)
 
-![wireguard-ui 0.3.7](https://user-images.githubusercontent.com/37958026/177041280-e3e7ca16-d4cf-4e95-9920-68af15e780dd.png)
+- Web UI to manage WireGuard peers (create, edit, enable/disable, remove).
+- Richer client records (name, email, notes, subnet ranges, Telegram user id, etc.).
+- Distribute configs via **QR code**, **download**, **email**, or **Telegram**.
+- Global defaults (endpoint, DNS, MTU, keepalive, config path) and server interface editor.
+- Optional **Apply config** workflow to write `wg.conf` and optionally reload the kernel (`wg-quick` / `wg syncconf` when enabled).
+
+### New in v2
+
+- **Shell layout**: fixed sidebar + main content (`wgshell.css`), mobile-friendly nav, unified top bar with **Apply config** / pending-change handling.
+- **Dashboard**: at-a-glance server/client KPIs, WireGuard presence, and actions that match live data (`/api/dashboard-stats`, restart helpers where configured).
+- **Traffic**: bandwidth view backed by cached WireGuard counter samples (`/api/wg-traffic-series`), range presets, peer-aware charts.
+- **Logs**: live sections when enabled (global “Logs” toggle)—optional file tail (`WGUI_LOG_TAIL_PATH`), `systemctl` / `journalctl` snippets for `wg-quick@…`, periodic refresh from `/api/system-logs`.
+- **Status**: read-only peer table from `wgctrl` for quick inspection.
+- **Global settings (expanded)**: configurable **session idle timeout** (minutes), **Passkeys** master toggle, **UI theme** (dark / light / auto), **UI language** (English / Spanish), **realtime stats** gate for Logs/Dashboard polling; staged save + apply flow with localStorage dirty tracking.
+- **Internationalization**: strings in `locale/en.json` and `locale/es.json`; templates use `tr` / client bundle `WG_T` + `wgT()` for JS toasts and dynamic UI.
+- **Multi-user auth**: **Users** admin page—create/edit/delete users, admin role, suspend account, revoke all sessions, inline Passkey add/remove/rename per user.
+- **My account / Profile**: self-service display name, email, password change, own Passkeys.
+- **Passkeys (WebAuthn)**: passwordless sign-in and registration flows; env knobs for RP ID / origins behind reverse proxies (`WGUI_WEBAUTHN_*`).
+- **Server page extras** (Linux, when allowed): optional **IPv4 forwarding** via `sysctl`, **persist** / **auto-apply** preferences, **`wg-quick` down/up/restart** and **`wg syncconf`** after apply, optional **systemd**-based restarts.
+- **Wake-on-LAN**: manage hosts and send magic packets from the UI.
+- **Client list UX**: card layout with inline enable toggle, traffic chips fed by **`/api/wg-peer-stats`**, and “Apply config” integration after edits.
+
+![WireGuard UI v2](https://github.com/user-attachments/assets/b4454f2d-21ae-4d36-89b6-19c1260a930b)
 
 ## Run WireGuard-UI
 
@@ -75,6 +105,18 @@ docker-compose up
 | `TELEGRAM_ALLOW_CONF_REQUEST` | Allow users to get configs from the bot by sending a message                                                                                                                                                                                                                        | `false`                            |
 | `TELEGRAM_FLOOD_WAIT`         | Time in minutes before the next conf request is processed                                                                                                                                                                                                                           | `60`                               |
 
+### Session idle timeout (`Configuración` → Sesión y seguridad)
+
+In the UI, **Tiempo de sesión (minutos)** is stored as `session_timeout_minutes` (integer). **Always use whole minutes—not seconds.**
+
+| Item | Detail |
+|------|--------|
+| **Unit** | **Minutes**, range **5–1440** (about 24 h max). Example: enter `30` for ~30 minutes. |
+| **Behavior** | **Idle logout:** after no authenticated HTTP request for longer than this time, the session is invalid (each request resets the idle clock). Applies to browsing and API endpoints that enforce `ValidSession`. |
+| **When it applies** | After saving from **Settings** and confirming **Aplicar config**, new sessions use this value when users **log in again**. Log out or wait for expiry to observe the change immediately. |
+| **Remember-me** | If a finite timeout is set in global settings, the login checkbox no longer lengthens the session to 7 days. |
+| **`SESSION_MAX_DURATION`** | Separate hard cap on how long any session identity may persist (days from login), independent of idle timeout. See the env table above. |
+
 ### Defaults for server configuration
 
 These environment variables are used to control the default server settings used when initializing the database.
@@ -106,9 +148,135 @@ These environment variables only apply to the docker container.
 | `WGUI_MANAGE_START`   | Start/stop WireGuard when the container is started/stopped    | `false` |
 | `WGUI_MANAGE_RESTART` | Auto restart WireGuard when we Apply Config changes in the UI | `false` |
 
+### Servidor UI (optional OS integration)
+
+Gate optional privileged actions invoked from the **Servidor** page (binary or Docker—the process must run on Linux with adequate permissions where needed):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WGUI_ALLOW_SYSCTL_IP_FORWARD` | When `true`, saving with **Reenvío IP (ip_forward)** may run `sysctl -w net.ipv4.ip_forward=1` / `...=0` on Linux. Without it, only the preference is stored in the database. Ignored outside Linux. | `false` |
+| `WGUI_WG_SYNCCONF_AFTER_APPLY` | When `true`, **Aplicar config** runs **`wg-quick strip <conf> \| wg syncconf <iface>`** on Linux so the running WireGuard matches the written file (e.g. disabling a client removes its peer from the server without `wg-quick down/up`). Requires `wg` and `wg-quick` on `$PATH`. If unset or `false`, Apply only writes the file/hash and does not reload kernel state. | `false` |
+| `WGUI_ALLOW_WG_QUICK` | When `true`, **Apply** can run `wg-quick` down/up and **Servidor** shows **Detener** / **Iniciar** / **Reiniciar**. If unset, wg-quick controls are **off**. Start with `WGUI_ALLOW_WG_QUICK=true` when you intend to restart the tunnel from the UI. Env values are trimmed before parsing. | `false` |
+| `WGUI_WG_RESTART_VIA_SYSTEMD` | On Linux, **Apply** prefers `systemctl restart wg-quick@ifac` when that unit exists (`LoadState=loaded`), so **`journalctl -u wg-quick@wg0`** shows restarts like a manual systemd restart. If `false` or no systemd, uses `wg-quick down`/`up`. | `true` |
+| `WGUI_LOG_TAIL_PATH` | Optional absolute path to a log file shown in the **Logs** page. This variable is read-only: wireguard-ui does not write this file automatically. | _(unset)_ |
+| `WGUI_WEBAUTHN_RP_ID` | Optional fixed WebAuthn RP ID (recommended behind reverse proxy/public domain). If unset, it is inferred from request host. | _(auto)_ |
+| `WGUI_WEBAUTHN_RP_ORIGINS` | Optional comma-separated allowed origins for Passkeys (example: `https://vpn.example.com,https://admin.example.com`). If unset, origin is inferred per request. | _(auto)_ |
+| `WGUI_WEBAUTHN_RP_DISPLAY_NAME` | Optional WebAuthn RP display name shown by authenticators. | `WireGuard UI` |
+
+#### `WGUI_LOG_TAIL_PATH` quick setup (systemd)
+
+Use this when you want the **Logs** page to also show a custom application log file.
+
+1. Add environment variable to your wireguard-ui service:
+
+```ini
+[Service]
+Environment="WGUI_LOG_TAIL_PATH=/var/log/wireguard-ui.log"
+```
+
+2. Ensure file exists and is readable by the service user:
+
+```bash
+sudo touch /var/log/wireguard-ui.log
+sudo chmod 640 /var/log/wireguard-ui.log
+```
+
+3. (Recommended) append service stdout/stderr to that file:
+
+```ini
+[Service]
+StandardOutput=append:/var/log/wireguard-ui.log
+StandardError=append:/var/log/wireguard-ui.log
+```
+
+4. Reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart wireguard-ui
+```
+
+5. Verify:
+
+```bash
+sudo systemctl show wireguard-ui -p Environment
+sudo tail -n 50 /var/log/wireguard-ui.log
+```
+
+> Note: The Logs page now also includes `systemctl status wg-quick@<iface>` and recent `journalctl` output. `WGUI_LOG_TAIL_PATH` is only for the optional file section.
+
+#### Passkeys (WebAuthn) behind reverse proxy (systemd example)
+
+If you use a public domain and/or reverse proxy (Nginx, Caddy, Traefik, Cloudflare Tunnel), define a fixed WebAuthn RP ID and allowed origins:
+
+```ini
+[Service]
+Environment="WGUI_WEBAUTHN_RP_ID=vpn.example.com"
+Environment="WGUI_WEBAUTHN_RP_ORIGINS=https://vpn.example.com"
+Environment="WGUI_WEBAUTHN_RP_DISPLAY_NAME=WireGuard UI"
+```
+
+Then reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart wireguard-ui
+```
+
+Notes:
+- `WGUI_WEBAUTHN_RP_ID` must match your effective login domain.
+- `WGUI_WEBAUTHN_RP_ORIGINS` accepts comma-separated values for multi-origin setups.
+- Passkeys require `https://` in production (browsers only allow non-HTTPS for localhost).
+
+##### Caddy + Dynamic DNS (No-IP): quick HTTPS so Passkeys work
+
+Browsers treat Passkeys/WebAuthn as **[secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)** (`https://` on a hostname, or `http://localhost`). Plain `http://<tu-ip>` is **not** enough. Use a hostname (No-IP, DuckDNS, etc.), forward ports **80** and **443**, and terminate TLS with Caddy.
+
+1. **No-IP (or similar)**  
+   Create `tuhost.ddns.net` (example), install the updater or rely on No-IP so the **A record** points to your **WAN** public IP.
+
+2. **Firewall / router**  
+   Forward **TCP 80** and **TCP 443** from the internet to the machine that runs Caddy (required for Let’s Encrypt HTTP-01 by default).
+
+3. **Install Caddy**  
+   Follow [Caddy install docs](https://caddyserver.com/docs/install) for your distro (official repo or package).
+
+4. **`Caddyfile`** (minimal reverse proxy to WireGuard UI on loopback):
+
+   ```caddyfile
+   tuhost.ddns.net {
+       encode gzip
+       reverse_proxy 127.0.0.1:5000
+   }
+   ```
+
+   Replace `tuhost.ddns.net` with your hostname and **`5000`** with the port where `wireguard-ui` listens (`BIND_ADDRESS`, e.g. `:5000` or `127.0.0.1:5000`).
+
+5. **(Optional, recommended)** Listen only on localhost so only Caddy exposes HTTPS:
+
+   ```bash
+   BIND_ADDRESS=127.0.0.1:5000 ./wireguard-ui
+   ```
+
+6. **Restart Caddy**, then open **`https://tuhost.ddns.net`** and confirm the browser shows a **valid lock** (no certificate warnings).
+
+7. **`wireguard-ui` systemd** — set RP ID/origin to match **exactly** what users type in the browser:
+
+   ```ini
+   [Service]
+   Environment="WGUI_WEBAUTHN_RP_ID=tuhost.ddns.net"
+   Environment="WGUI_WEBAUTHN_RP_ORIGINS=https://tuhost.ddns.net"
+   ```
+
+   Then `daemon-reload` and `restart wireguard-ui`.
+
+8. **Inside the UI** — **Configuración** → enable **Passkeys** → **Aplicar config**. Then **Administración → Usuarios**: register a passkey per user. Login page will offer **Entrar con Passkey** once enabled.
+
+If HTTPS still fails behind NAT, verify port 80 reaches Caddy on first certificate issuance; use `journalctl -u caddy -f` on errors.
+
 ## Auto restart WireGuard daemon
 
-WireGuard-UI only takes care of configuration generation. You can use systemd to watch for the changes and restart the
+WireGuard-UI only takes care of configuration generation. On Linux you can enable in-process `wg syncconf` after apply (see variables above), or use systemd to watch for changes and restart the
 service. Following is an example:
 
 ### Using systemd

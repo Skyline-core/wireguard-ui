@@ -64,6 +64,15 @@ const (
 	DefaultClientExtraAllowedIpsEnvVar     = "WGUI_DEFAULT_CLIENT_EXTRA_ALLOWED_IPS"
 	DefaultClientUseServerDNSEnvVar        = "WGUI_DEFAULT_CLIENT_USE_SERVER_DNS"
 	DefaultClientEnableAfterCreationEnvVar = "WGUI_DEFAULT_CLIENT_ENABLE_AFTER_CREATION"
+	AllowSysctlIPForwardEnvVar             = "WGUI_ALLOW_SYSCTL_IP_FORWARD"
+	AllowWgQuickCtlEnvVar                  = "WGUI_ALLOW_WG_QUICK"
+	RestartWGViaSystemdEnvVar              = "WGUI_WG_RESTART_VIA_SYSTEMD"
+	WebAuthnRPIDEnvVar                     = "WGUI_WEBAUTHN_RP_ID"
+	WebAuthnRPOriginsEnvVar                = "WGUI_WEBAUTHN_RP_ORIGINS"
+	WebAuthnRPDisplayNameEnvVar            = "WGUI_WEBAUTHN_RP_DISPLAY_NAME"
+	// SyncConfAfterApplyEnvVar: if set, parse as bool — run wg-quick strip | wg syncconf after writing wg.conf (“Apply config”).
+	// If unset, defaults to matching WGUI_ALLOW_WG_QUICK so peers update in-kernel without full restart when host tools exist.
+	SyncConfAfterApplyEnvVar = "WGUI_WG_SYNCCONF_AFTER_APPLY"
 )
 
 func ParseBasePath(basePath string) string {

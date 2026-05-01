@@ -5,6 +5,7 @@
 *.so
 *.dylib
 wireguard-ui
+wireguard-ui-v2
 
 # Test binary, built with `go test -c`
 *.test
@@ -21,6 +22,8 @@ node_modules/
 # IDEs
 .vscode
 .idea
+
+.DS_Store
 
 # Vim
 .*.sw[op]
