@@ -23,6 +23,13 @@ node_modules/
 .vscode
 .idea
 
+# Agent skills (e.g. npx skills add → .agents/skills)
+.agents/
+skills-lock.json
+
+# Local agent tooling (e.g. Claude Code)
+.claude/
+
 .DS_Store
 
 # Vim
