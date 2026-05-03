@@ -2,6 +2,21 @@
 
 # wireguard-ui
 
+## Contents
+
+Quick links to the main documentation sections:
+
+- [WireGuard UI v2](#wireguard-ui-v2) — what changed in this fork and how to switch language
+- [Features](#features) — classic and v2 capabilities
+- [HTTP API reference](#http-api-reference) — JSON routes, auth, and mobile-related endpoints
+- [Run WireGuard-UI](#run-wireguard-ui) — binary and Docker Compose
+- [Environment variables](#environment-variables) — configuration reference
+- [Firebase Cloud Messaging (FCM)](#firebase-cloud-messaging-fcm) — push setup and registration API
+- [Session idle timeout](#session-idle-timeout-settings--session--security) — minutes-based idle logout
+- [Auto restart WireGuard daemon](#auto-restart-wireguard-daemon) — systemd / OpenRC / Docker
+- [Build](#build) — assets, Docker image, binary
+- [License](#license)
+
 ## WireGuard UI v2
 
 This repository ships **version 2** of the WireGuard UI: an updated shell-style layout, richer monitoring and administration pages, Passkeys (WebAuthn) support, bilingual UI (English / Spanish via `locale/en.json` and `locale/es.json`), and extended optional OS integration (sysctl, `wg-quick` / `wg syncconf`, log tail) while keeping the same core purpose as the upstream project—manage peers, generate configs, and distribute them by QR, file, email, or Telegram.
@@ -42,6 +57,134 @@ A web user interface to manage your WireGuard setup.
 - **Client list UX**: card layout with inline enable toggle, traffic chips fed by **`/api/wg-peer-stats`**, and "Apply config" integration after edits.
 
 ![WireGuard UI v2](https://github.com/user-attachments/assets/b4454f2d-21ae-4d36-89b6-19c1260a930b)
+
+## HTTP API reference
+
+Unless noted otherwise, paths are rooted at your configured **`BASE_PATH`** (empty at the site root, or e.g. `/wireguard`). Prefix every path below with that value.
+
+**Sessions.** Most endpoints require a valid browser session cookie (`ValidSession`). A few JSON `POST` routes are public for Passkey login. JSON bodies expect **`Content-Type: application/json`** (this also mitigates simple CSRF from third-party sites).
+
+**Admin-only** routes additionally require an administrator account (`NeedsAdmin` in the code).
+
+### Well-known and health
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET`, `HEAD` | `/.well-known/assetlinks.json` | No | Digital Asset Links for Android Passkeys / Credential Manager (also mirrored under `BASE_PATH` when set; see comments in `main.go`). |
+| `GET` | `{BASE}/_health` | No | Liveness probe. |
+
+### Public and login
+
+When login is **not** disabled:
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `{BASE}/login` | No | Login HTML. |
+| `POST` | `{BASE}/login` | No | Password login (JSON). |
+| `GET` | `{BASE}/api/public/login-wg-status` | No | WireGuard tunnel summary for the login banner. |
+| `POST` | `{BASE}/api/passkeys/login/begin` | No | WebAuthn assertion options (JSON). |
+| `POST` | `{BASE}/api/passkeys/login/finish` | No | Complete Passkey login (JSON). |
+
+### Passkeys (authenticated)
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `POST` | `{BASE}/api/passkeys/register/:username/begin` | Start registration for `username`. |
+| `POST` | `{BASE}/api/passkeys/register/:username/finish` | Finish registration. |
+| `POST` | `{BASE}/api/passkeys/remove` | Remove a credential. |
+| `POST` | `{BASE}/api/passkeys/rename` | Rename a credential. |
+
+### Users and profile
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `POST` | `{BASE}/update-user` | Update profile fields. |
+| `POST` | `{BASE}/create-user` | **Admin.** Create user. |
+| `POST` | `{BASE}/remove-user` | **Admin.** Remove user. |
+| `GET` | `{BASE}/get-users` | **Admin.** List users. |
+| `GET` | `{BASE}/api/user/:username` | Fetch one user. |
+| `GET` | `{BASE}/api/profile/passkeys` | Passkeys for the current user. |
+| `POST` | `{BASE}/api/user/set-admin` | **Admin.** |
+| `POST` | `{BASE}/api/user/set-disabled` | **Admin.** |
+| `POST` | `{BASE}/api/user/revoke-sessions` | **Admin.** |
+
+### Peers (clients)
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `GET` | `{BASE}/api/clients` | List all clients. |
+| `GET` | `{BASE}/api/client/:id` | One client by numeric `id`. |
+| `POST` | `{BASE}/new-client` | Create client. |
+| `POST` | `{BASE}/update-client` | Update client. |
+| `POST` | `{BASE}/remove-client` | Delete client. |
+| `POST` | `{BASE}/client/set-status` | Enable/disable. |
+| `POST` | `{BASE}/email-client` | Email configuration. |
+| `POST` | `{BASE}/send-telegram-client` | Telegram delivery. |
+| `GET` | `{BASE}/download` | Download one `.conf`. |
+| `GET` | `{BASE}/download-all-configs` | **Admin.** ZIP of all peers. |
+
+### Dashboard, stats, and traffic
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `GET` | `{BASE}/api/dashboard-stats` | KPIs for the dashboard. |
+| `GET` | `{BASE}/api/wg-peer-stats` | Per-peer counters for lists. |
+| `GET` | `{BASE}/api/wg-traffic-series` | Cached series; query `range=24h` (default), `7d`, or `30d`. |
+| `GET` | `{BASE}/api/machine-ips` | Suggested endpoint IPs. |
+| `GET` | `{BASE}/api/subnet-ranges` | Ordered subnet ranges. |
+| `GET` | `{BASE}/api/suggest-client-ips` | IP allocation hints. |
+| `GET` | `{BASE}/api/ui-nav-hints` | Small JSON payload; useful as a **connectivity / session check** for native clients. |
+
+### WireGuard server, apply, and tunnel control
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `POST` | `{BASE}/wg-server/interfaces` | **Admin.** Save interface list from UI flow. |
+| `POST` | `{BASE}/api/wg-server/save-page` | **Admin.** Combined “Server” tab JSON save. |
+| `POST` | `{BASE}/wg-server/keypair` | **Admin.** Generate server keypair. |
+| `POST` | `{BASE}/api/apply-wg-config` | Write `wg.conf` / apply workflow (JSON). |
+| `GET` | `{BASE}/api/wireguard/tunnel-status` | Tunnel up/down and interface summary. |
+| `POST` | `{BASE}/api/wireguard/wg-quick-down` | **Admin.** `wg-quick` down. |
+| `POST` | `{BASE}/api/wireguard/wg-quick-up` | **Admin.** `wg-quick` up. |
+
+### Push notifications (FCM)
+
+| Method | Path | Body (JSON) |
+|--------|------|-------------|
+| `POST` | `{BASE}/api/push/register` | `{"token":"<FCM registration token>","platform":"android"}` |
+| `POST` | `{BASE}/api/push/unregister` | `{"token":"<FCM registration token>"}` |
+
+Requires a valid session. See [Firebase Cloud Messaging (FCM)](#firebase-cloud-messaging-fcm) for server env vars.
+
+### Global settings and logs
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `POST` | `{BASE}/global-settings` | **Admin.** Save global settings (JSON). |
+| `POST` | `{BASE}/api/global-settings/realtime-stats` | **Admin.** Toggle realtime stats. |
+| `GET` | `{BASE}/api/system-logs` | Log tail / snippets when enabled. |
+
+### Wake-on-LAN
+
+| Method | Path |
+|--------|------|
+| `POST` | `{BASE}/wake_on_lan_host` |
+| `DELETE` | `{BASE}/wake_on_lan_host/:mac_address` |
+| `PUT` | `{BASE}/wake_on_lan_host/:mac_address` |
+
+### HTML pages (session)
+
+These return HTML for the v2 shell, not JSON: `{BASE}/` (clients), `{BASE}/dashboard`, `{BASE}/traffic`, `{BASE}/logs`, `{BASE}/profile`, `{BASE}/users-settings` (**admin**), `{BASE}/wg-server` (**admin**), `{BASE}/global-settings` (**admin**), `{BASE}/status`, `{BASE}/wake_on_lan_hosts`, `{BASE}/about`. Use the JSON routes above for API integrations.
+
+### Logout and misc
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `GET` | `{BASE}/logout` | Ends session when login is enabled. |
+| `GET` | `{BASE}/test-hash` | Internal/config hash probe (session). |
+| `GET` | `{BASE}/favicon` | Favicon bytes. |
+
+---
 
 ## Run WireGuard-UI
 
