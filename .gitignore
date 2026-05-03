@@ -32,6 +32,9 @@ skills-lock.json
 
 .DS_Store
 
+# Firebase Admin SDK service account JSON (FCM_CREDENTIALS_FILE / GOOGLE_APPLICATION_CREDENTIALS)
+*firebase-adminsdk*.json
+
 # Vim
 .*.sw[op]
 

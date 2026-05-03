@@ -20,6 +20,7 @@ import (
 
 	"github.com/ngoduykhanh/wireguard-ui/emailer"
 	"github.com/ngoduykhanh/wireguard-ui/handler"
+	"github.com/ngoduykhanh/wireguard-ui/pushnotify"
 	"github.com/ngoduykhanh/wireguard-ui/router"
 	"github.com/ngoduykhanh/wireguard-ui/store/jsondb"
 	"github.com/ngoduykhanh/wireguard-ui/util"
@@ -180,6 +181,11 @@ func main() {
 	if err := db.Init(); err != nil {
 		panic(err)
 	}
+	fcmCred := strings.TrimSpace(os.Getenv("FCM_CREDENTIALS_FILE"))
+	if fcmCred == "" {
+		fcmCred = strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+	}
+	pushnotify.Init(fcmCred, func() string { return db.GetPath() })
 	// set app extra data
 	extraData := make(map[string]interface{})
 	extraData["appVersion"] = appVersion
@@ -211,11 +217,24 @@ func main() {
 	// register routes
 	app := router.New(tmplDir, extraData, util.SessionSecret)
 
+	// Android only fetches https://<rpId>/.well-known/assetlinks.json (host root). Many reverse
+	// proxies only forward BASE_PATH to this app, so / returns 404 — those installs must add a
+	// proxy/alias for /.well-known/assetlinks.json to this handler (or mirror the JSON from the
+	// duplicate URL below). See handler/android_assetlinks.go.
+	assetLinks := handler.AndroidDigitalAssetLinks()
+	app.GET("/.well-known/assetlinks.json", assetLinks)
+	app.HEAD("/.well-known/assetlinks.json", assetLinks)
+	if alt := util.BasePath + "/.well-known/assetlinks.json"; alt != "/.well-known/assetlinks.json" {
+		app.GET(alt, assetLinks)
+		app.HEAD(alt, assetLinks)
+	}
+
 	app.GET(util.BasePath, handler.WireGuardClients(db), handler.ValidSession, handler.RefreshSession)
 	app.GET(util.BasePath+"/dashboard", handler.Dashboard(db), handler.ValidSession, handler.RefreshSession)
 	app.GET(util.BasePath+"/traffic", handler.TrafficPage(db), handler.ValidSession, handler.RefreshSession)
 	app.GET(util.BasePath+"/logs", handler.LogsPage(db), handler.ValidSession, handler.RefreshSession)
 	app.GET(util.BasePath+"/api/system-logs", handler.APISystemLogs(db), handler.ValidSession, handler.RefreshSession)
+	app.POST(util.BasePath+"/api/global-settings/realtime-stats", handler.APISetRealtimeStatsEnabled(db), handler.ValidSession, handler.ContentTypeJson, handler.RefreshSession, handler.NeedsAdmin)
 
 	// Important: Make sure that all non-GET routes check the request content type using handler.ContentTypeJson to
 	// mitigate CSRF attacks. This is effective, because browsers don't allow setting the Content-Type header on
@@ -271,6 +290,8 @@ func main() {
 	app.POST(util.BasePath+"/api/wireguard/wg-quick-up", handler.WireGuardQuickStart(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
 	// Same session gate as /api/apply-wg-config (ValidSession, not admin-only) so managers can align restart with tunnel state.
 	app.GET(util.BasePath+"/api/wireguard/tunnel-status", handler.WireGuardTunnelStatus(db), handler.ValidSession, handler.RefreshSession)
+	app.POST(util.BasePath+"/api/push/register", handler.RegisterPushToken(db), handler.ValidSession, handler.ContentTypeJson, handler.RefreshSession)
+	app.POST(util.BasePath+"/api/push/unregister", handler.UnregisterPushToken(db), handler.ValidSession, handler.ContentTypeJson, handler.RefreshSession)
 	app.POST(util.BasePath+"/wg-server/keypair", handler.WireGuardServerKeyPair(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)
 	app.GET(util.BasePath+"/global-settings", handler.GlobalSettings(db), handler.ValidSession, handler.RefreshSession, handler.NeedsAdmin)
 	app.POST(util.BasePath+"/global-settings", handler.GlobalSettingSubmit(db), handler.ValidSession, handler.ContentTypeJson, handler.NeedsAdmin)

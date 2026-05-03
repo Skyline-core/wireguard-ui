@@ -30,16 +30,16 @@ A web user interface to manage your WireGuard setup.
 - **Shell layout**: fixed sidebar + main content (`wgshell.css`), mobile-friendly nav, unified top bar with **Apply config** / pending-change handling.
 - **Dashboard**: at-a-glance server/client KPIs, WireGuard presence, and actions that match live data (`/api/dashboard-stats`, restart helpers where configured).
 - **Traffic**: bandwidth view backed by cached WireGuard counter samples (`/api/wg-traffic-series`), range presets, peer-aware charts.
-- **Logs**: live sections when enabled (global “Logs” toggle)—optional file tail (`WGUI_LOG_TAIL_PATH`), `systemctl` / `journalctl` snippets for `wg-quick@…`, periodic refresh from `/api/system-logs`.
+- **Logs**: live sections when enabled (global "Logs" toggle)—optional file tail (`WGUI_LOG_TAIL_PATH`), `systemctl` / `journalctl` snippets for `wg-quick@...`, periodic refresh from `/api/system-logs`.
 - **Status**: read-only peer table from `wgctrl` for quick inspection.
 - **Global settings (expanded)**: configurable **session idle timeout** (minutes), **Passkeys** master toggle, **UI theme** (dark / light / auto), **UI language** (English / Spanish), **realtime stats** gate for Logs/Dashboard polling; staged save + apply flow with localStorage dirty tracking.
 - **Internationalization**: strings in `locale/en.json` and `locale/es.json`; templates use `tr` / client bundle `WG_T` + `wgT()` for JS toasts and dynamic UI.
 - **Multi-user auth**: **Users** admin page—create/edit/delete users, admin role, suspend account, revoke all sessions, inline Passkey add/remove/rename per user.
 - **My account / Profile**: self-service display name, email, password change, own Passkeys.
-- **Passkeys (WebAuthn)**: passwordless sign-in and registration flows; env knobs for RP ID / origins behind reverse proxies (`WGUI_WEBAUTHN_*`).
+- **Passkeys (WebAuthn)**: passwordless sign-in and registration flows; env knobs for RP ID / origins behind reverse proxies (`WGUI_WEBAUTHN_*`). Optional **`WGUI_ANDROID_PASSKEY_*`** + reverse-proxy wiring for **`/.well-known/assetlinks.json`** unlock the Flutter Android client's Credential Manager flows.
 - **Server page extras** (Linux, when allowed): optional **IPv4 forwarding** via `sysctl`, **persist** / **auto-apply** preferences, **`wg-quick` down/up/restart** and **`wg syncconf`** after apply, optional **systemd**-based restarts.
 - **Wake-on-LAN**: manage hosts and send magic packets from the UI.
-- **Client list UX**: card layout with inline enable toggle, traffic chips fed by **`/api/wg-peer-stats`**, and “Apply config” integration after edits.
+- **Client list UX**: card layout with inline enable toggle, traffic chips fed by **`/api/wg-peer-stats`**, and "Apply config" integration after edits.
 
 ![WireGuard UI v2](https://github.com/user-attachments/assets/b4454f2d-21ae-4d36-89b6-19c1260a930b)
 
@@ -54,6 +54,8 @@ Download the binary file from the release page and run it directly on the host m
 ```
 ./wireguard-ui
 ```
+
+For a **persistent** install on Linux, register **systemd** as described in **[systemd: install and enable the web service](#systemd-install-and-enable-the-web-service)** below (working directory, database, environment files, permissions).
 
 ### Using docker compose
 
@@ -104,16 +106,64 @@ docker-compose up
 | `TELEGRAM_TOKEN`              | Telegram bot token for distributing configs to clients                                                                                                                                                                                                                              | N/A                                |
 | `TELEGRAM_ALLOW_CONF_REQUEST` | Allow users to get configs from the bot by sending a message                                                                                                                                                                                                                        | `false`                            |
 | `TELEGRAM_FLOOD_WAIT`         | Time in minutes before the next conf request is processed                                                                                                                                                                                                                           | `60`                               |
+| `FCM_CREDENTIALS_FILE`       | Absolute path to the Firebase **service account** JSON used to send **FCM push** notifications (Android app tokens). If empty, `GOOGLE_APPLICATION_CREDENTIALS` is used instead. If neither resolves to a readable file, push is disabled. **Not** the same file as the app's `google-services.json`. | N/A                                |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Standard Google env: path to the **same** service account JSON as above. Used when `FCM_CREDENTIALS_FILE` is unset.                                                                                                                                    | N/A                                |
 
-### Session idle timeout (`Configuración` → Sesión y seguridad)
+### Firebase Cloud Messaging (FCM)
 
-In the UI, **Tiempo de sesión (minutos)** is stored as `session_timeout_minutes` (integer). **Always use whole minutes—not seconds.**
+The server can send **push notifications** (e.g. peer created/removed/enabled/disabled, tunnel up/down) to devices that register an FCM token. Implementation lives in the `pushnotify` package. **FCM itself has no per-message charge** in typical Firebase usage; you still need a Firebase project and a service account for the Admin SDK.
+
+#### Server setup
+
+1. Open **[Firebase Console](https://console.firebase.google.com/)** → your project → **Project settings** (gear) → **Service accounts**.
+2. Click **Generate new private key** and download the JSON. Store it on the server only (for example `/etc/wireguard-ui/firebase-adminsdk.json`). **Do not commit this file.** Restrict permissions (`chmod 600`, owned by the service user).
+3. Point wireguard-ui at that file using **`FCM_CREDENTIALS_FILE`** (recommended) or **`GOOGLE_APPLICATION_CREDENTIALS`** (same path; used if `FCM_CREDENTIALS_FILE` is empty).
+4. Restart wireguard-ui. You should see a log line such as **`FCM enabled`**. If credentials are missing or invalid, push stays off and an error is logged.
+
+#### Project ID
+
+The Firebase Go SDK needs a **Google Cloud / Firebase project ID**. It is normally taken from the **`project_id`** field inside the service account JSON. If you see **`project ID is required`** (or similar) in logs, set one of:
+
+| Variable | Purpose |
+|----------|---------|
+| `FIREBASE_PROJECT_ID` | Explicit Firebase/GCP project ID (highest precedence in app config). |
+| `GOOGLE_CLOUD_PROJECT` | Same intent; common on GCP VMs. |
+| `GCLOUD_PROJECT` | Same intent; legacy/alternate env name. |
+
+Ensure the JSON file is the **service account key** from Firebase (it always contains `"type": "service_account"` and `"project_id"`).
+
+#### Not the Android client file
+
+- **`google-services.json`** is only for the **Android app** (Flutter `android/app/`). The **wireguard-ui server does not read it.** Server-side sending uses only the **service account** JSON from step 2.
+
+#### Registration HTTP API
+
+Authenticated JSON endpoints (same session cookies as the rest of the UI):
+
+| Method | Path | Body |
+|--------|------|------|
+| `POST` | `{BASE_PATH}/api/push/register` | `{"token":"<FCM registration token>","platform":"android"}` |
+| `POST` | `{BASE_PATH}/api/push/unregister` | `{"token":"<FCM registration token>"}` |
+
+Registered tokens are persisted under the server DB directory (e.g. **`push_tokens.json`** next to other JSON store files).
+
+#### Rate limiting
+
+Outbound FCM sends are **rate-limited per device token** (for example **at most 3 notifications per minute per token**) to avoid flooding.
+
+#### Flutter Android client
+
+Configure Firebase for the app package name, place **`google-services.json`** in **`android/app/`**, and enable push in the app; see the companion repo **`wireguard-ui-android-client`** README.
+
+### Session idle timeout (**Settings** → **Session & security**)
+
+In the UI, **Session idle timeout (minutes)** is stored as `session_timeout_minutes` (integer). **Always use whole minutes—not seconds.**
 
 | Item | Detail |
 |------|--------|
-| **Unit** | **Minutes**, range **5–1440** (about 24 h max). Example: enter `30` for ~30 minutes. |
+| **Unit** | **Minutes**, range **5-1440** (about 24 h max). Example: enter `30` for ~30 minutes. |
 | **Behavior** | **Idle logout:** after no authenticated HTTP request for longer than this time, the session is invalid (each request resets the idle clock). Applies to browsing and API endpoints that enforce `ValidSession`. |
-| **When it applies** | After saving from **Settings** and confirming **Aplicar config**, new sessions use this value when users **log in again**. Log out or wait for expiry to observe the change immediately. |
+| **When it applies** | After saving from **Settings** and confirming **Apply config**, new sessions use this value when users **log in again**. Log out or wait for expiry to observe the change immediately. |
 | **Remember-me** | If a finite timeout is set in global settings, the login checkbox no longer lengthens the session to 7 days. |
 | **`SESSION_MAX_DURATION`** | Separate hard cap on how long any session identity may persist (days from login), independent of idle timeout. See the env table above. |
 
@@ -148,25 +198,27 @@ These environment variables only apply to the docker container.
 | `WGUI_MANAGE_START`   | Start/stop WireGuard when the container is started/stopped    | `false` |
 | `WGUI_MANAGE_RESTART` | Auto restart WireGuard when we Apply Config changes in the UI | `false` |
 
-### Servidor UI (optional OS integration)
+### Server UI (optional OS integration)
 
-Gate optional privileged actions invoked from the **Servidor** page (binary or Docker—the process must run on Linux with adequate permissions where needed):
+Gate optional privileged actions invoked from the **Server** page (binary or Docker—the process must run on Linux with adequate permissions where needed):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `WGUI_ALLOW_SYSCTL_IP_FORWARD` | When `true`, saving with **Reenvío IP (ip_forward)** may run `sysctl -w net.ipv4.ip_forward=1` / `...=0` on Linux. Without it, only the preference is stored in the database. Ignored outside Linux. | `false` |
-| `WGUI_WG_SYNCCONF_AFTER_APPLY` | When `true`, **Aplicar config** runs **`wg-quick strip <conf> \| wg syncconf <iface>`** on Linux so the running WireGuard matches the written file (e.g. disabling a client removes its peer from the server without `wg-quick down/up`). Requires `wg` and `wg-quick` on `$PATH`. If unset or `false`, Apply only writes the file/hash and does not reload kernel state. | `false` |
-| `WGUI_ALLOW_WG_QUICK` | When `true`, **Apply** can run `wg-quick` down/up and **Servidor** shows **Detener** / **Iniciar** / **Reiniciar**. If unset, wg-quick controls are **off**. Start with `WGUI_ALLOW_WG_QUICK=true` when you intend to restart the tunnel from the UI. Env values are trimmed before parsing. | `false` |
+| `WGUI_ALLOW_SYSCTL_IP_FORWARD` | When `true`, saving with **IPv4 forwarding (ip_forward)** may run `sysctl -w net.ipv4.ip_forward=1` / `...=0` on Linux. Without it, only the preference is stored in the database. Ignored outside Linux. | `false` |
+| `WGUI_WG_SYNCCONF_AFTER_APPLY` | When `true`, **Apply config** runs **`wg-quick strip <conf> \| wg syncconf <iface>`** on Linux so the running WireGuard matches the written file (e.g. disabling a client removes its peer from the server without `wg-quick down/up`). Requires `wg` and `wg-quick` on `$PATH`. If unset or `false`, Apply only writes the file/hash and does not reload kernel state. | `false` |
+| `WGUI_ALLOW_WG_QUICK` | When `true`, **Apply** can run `wg-quick` down/up and the **Server** page shows **Stop** / **Start** / **Restart**. If unset, wg-quick controls are **off**. Start with `WGUI_ALLOW_WG_QUICK=true` when you intend to restart the tunnel from the UI. Env values are trimmed before parsing. | `false` |
 | `WGUI_WG_RESTART_VIA_SYSTEMD` | On Linux, **Apply** prefers `systemctl restart wg-quick@ifac` when that unit exists (`LoadState=loaded`), so **`journalctl -u wg-quick@wg0`** shows restarts like a manual systemd restart. If `false` or no systemd, uses `wg-quick down`/`up`. | `true` |
-| `WGUI_WGCONF_PENDING_WHEN_TUNNEL_STOPPED` | Linux: when Apply does **not** restart WireGuard while the netdev is absent/down (e.g. after **Detener**), the UI writes a side file next to `wg.conf` (suffix `.wgui-pending`) instead of overwriting the live **`WGUI_CONFIG_FILE_PATH`**. That avoids systemd **`.path`** units watching `wg.conf` that restart `wg-quick` on every save. **`wg-quick up`** or **Servidor › Iniciar** merges the pending file into `wg.conf` first. Set `false` to always write `wg.conf` directly (legacy). | `true` |
+| `WGUI_WGCONF_PENDING_WHEN_TUNNEL_STOPPED` | Linux: when Apply does **not** restart WireGuard while the netdev is absent/down (e.g. after **Stop**), the UI writes a side file next to `wg.conf` (suffix `.wgui-pending`) instead of overwriting the live **`WGUI_CONFIG_FILE_PATH`**. That avoids systemd **`.path`** units watching `wg.conf` that restart `wg-quick` on every save. **`wg-quick up`** or **Server › Start** merges the pending file into `wg.conf` first. Set `false` to always write `wg.conf` directly (legacy). | `true` |
 | `WGUI_LOG_TAIL_PATH` | Optional absolute path to a log file shown in the **Logs** page. This variable is read-only: wireguard-ui does not write this file automatically. | _(unset)_ |
 | `WGUI_WEBAUTHN_RP_ID` | Optional fixed WebAuthn RP ID (recommended behind reverse proxy/public domain). If unset, it is inferred from request host. | _(auto)_ |
 | `WGUI_WEBAUTHN_RP_ORIGINS` | Optional comma-separated allowed origins for Passkeys (example: `https://vpn.example.com,https://admin.example.com`). If unset, origin is inferred per request. | _(auto)_ |
 | `WGUI_WEBAUTHN_RP_DISPLAY_NAME` | Optional WebAuthn RP display name shown by authenticators. | `WireGuard UI` |
+| `WGUI_ANDROID_PASSKEY_SHA256` | One or more SHA-256 **signing-certificate fingerprints** of the Flutter/Android app (`./gradlew signingReport`), hex with or without colons, comma-separated. You may set this variable to an **absolute path** of a regular file (e.g. `/etc/wireguard-ui/android-SHA.secret`); the server reads the file contents as the same fingerprint string. The **wireguard-ui process user** must be able to read that file (e.g. `chgrp wireguard-ui` + `chmod 640`, or root-only if the service runs as root). Powers **`/.well-known/assetlinks.json`** (Digital Asset Links) and derives matching **`android:apk-key-hash:`** WebAuthn origins for native Android assertions. Unset ⇒ assetlinks endpoint returns 404 / no Android APK origins appended. |
+| `WGUI_ANDROID_PASSKEY_PACKAGE` | Android `applicationId` embedded in **`assetlinks.json`**. Omit to use **`com.wireguardui.wireguard_ui_client`**. |
 
 #### Troubleshooting: `wg-quick up` fails on `ip -6 route` / «Cannot find device wg0»
 
-After toggling peers and **Iniciar**, a failed half-bridge can leave routing in an odd state; the UI now runs **`wg-quick down`** (ignored if already down), waits briefly, then **`wg-quick up`**, and **retries once** if the first `up` still errors. If it persists, exclude **`wg0`** from **NetworkManager** / **systemd-networkd**, and ensure IPv6 is consistent (either working or intentionally off) with the **`Address`** line in **`wg.conf`**.
+After toggling peers and **Start**, a failed half-bridge can leave routing in an odd state; the UI now runs **`wg-quick down`** (ignored if already down), waits briefly, then **`wg-quick up`**, and **retries once** if the first `up` still errors. If it persists, exclude **`wg0`** from **NetworkManager** / **systemd-networkd**, and ensure IPv6 is consistent (either working or intentionally off) with the **`Address`** line in **`wg.conf`**.
 
 #### `WGUI_LOG_TAIL_PATH` quick setup (systemd)
 
@@ -212,7 +264,7 @@ sudo tail -n 50 /var/log/wireguard-ui.log
 
 #### Passkeys (WebAuthn) behind reverse proxy (systemd example)
 
-If you use a public domain and/or reverse proxy (Nginx, Caddy, Traefik, Cloudflare Tunnel), define a fixed WebAuthn RP ID and allowed origins:
+If you use a public domain and/or reverse proxy (Nginx, Caddy, Traefik, Cloudflare Tunnel), define a fixed WebAuthn RP ID and allowed origins. Add the following under **`[Service]`** (for example with **`systemctl edit wireguard-ui`** or entries in the same **`EnvironmentFile=`** you use in **[systemd: install and enable the web service](#systemd-install-and-enable-the-web-service)**):
 
 ```ini
 [Service]
@@ -233,15 +285,113 @@ Notes:
 - `WGUI_WEBAUTHN_RP_ORIGINS` accepts comma-separated values for multi-origin setups.
 - Passkeys require `https://` in production (browsers only allow non-HTTPS for localhost).
 
+##### Android app passkeys (companion Flutter client — Credential Manager)
+
+The Flutter Android companion app calls the same WireGuard UI WebAuthn JSON endpoints (**`POST`** **`{BASE_PATH}/api/passkeys/login/begin`**, **`/finish`**). Android **Credential Manager** still verifies **Digital Asset Links** independently: it downloads **`https://<rpId>/.well-known/assetlinks.json`** and checks package name + signing certificate fingerprints against your app install.
+
+Assertion signatures include **`Origin`** inside **`clientDataJSON`**. Browser users send origins like **`https://vpn.example.com`**. Native Android sends **`android:apk-key-hash:<base64url(SHA-256(signing-cert-digest))>`**. The **`go-webauthn`** verifier must therefore allow **both** your HTTPS origins **and** the APK-hash origin — WireGuard UI appends APK-hash origins whenever **`WGUI_ANDROID_PASSKEY_SHA256`** is set.
+
+**Suggested end-to-end flow**
+
+1. **Browser first:** In WireGuard UI, enable **Passkeys** under Global settings and **Apply config**. Open the panel URL (example: **`https://vpn.example.net/wg`** if `BASE_PATH` is **`/wg`**), visit **Profile** (or Administrator → **Users**), and enroll **at least one passkey** per account that should unlock the Android app. That registers credentials bound to **`WGUI_WEBAUTHN_RP_ID`** (or inferred host).
+2. **Server env:** Set **`WGUI_WEBAUTHN_RP_ORIGINS`** (comma-separated **`https://`** origins visitors actually see) plus **`WGUI_WEBAUTHN_RP_ID`** when you rely on proxies or internal hostnames — they must mirror the HTTPS hostname tied to **`assetlinks.json`**. Populate **`WGUI_ANDROID_PASSKEY_SHA256`** from `./gradlew signingReport`, matching whichever keystore ships on devices, and set **`WGUI_ANDROID_PASSKEY_PACKAGE`** if Gradle **`applicationId`** deviates from the default **`com.wireguardui.wireguard_ui_client`**.
+3. **Reverse proxy:** Route **`/.well-known/assetlinks.json`** on the panel hostname back to WireGuard UI (see examples below).
+4. **App:** Configure base URL/base path matching your API prefix. Fill **Passkey origin** if the HTTPS hostname where you enrolled passkeys differs from the API **`Host`** (LAN IP/API gateway case). Prefer **Username** + passkey together if the credential is not discoverable (common for web-created passkeys unless you mandated resident/discoverable enrollment).
+
+**Symptoms resolved by proper setup**
+
+| Symptom | Typical cause |
+|---------|----------------|
+| **`RP ID cannot be validated`** (Credential Manager DOM error) | Missing or inaccessible **`https://<rpId>/.well-known/assetlinks.json`** (**404**, auth wall, redirects). Proxies forwarding only **`{BASE_PATH}`** strand this path unless you terminate **`/.well-known`** upstream—see **[Digital Asset Links](https://developers.google.com/digital-asset-links/v1/getting-started)** tooling to validate statements externally. |
+| **`Invalid passkey`** after tapping a credential but **Digital Asset Links** already pass | Older servers missing APK-hash **`RPOrigins`**, malformed assertion body, mismatched **`WGUI_ANDROID_PASSKEY_SHA256`** vs APK, or **`begin`/`finish` session loss** — see cookie note below. |
+| **`HTTP 405`** (`curl -I` only) against assetlinks | `curl -I` issues **HEAD**. WireGuard UI implements **HEAD** + **GET**; if you proxy strips HEAD pick **GET** (**`curl -sS`**). |
+
+**Server configuration checklist**
+
+1. **`WGUI_ANDROID_PASSKEY_SHA256`** — fingerprint(s) comma-separated (**hex**, with or without colons), matching Android Studio / `./gradlew signingReport` (**SHA-256**) for whatever build ships to devices; or an **absolute path** to a file whose contents are that string (readable by the **wireguard-ui** process user).
+2. **`WGUI_ANDROID_PASSKEY_PACKAGE`** — optional **`applicationId`**, defaults to **`com.wireguardui.wireguard_ui_client`** inside **`assetlinks.json`**.
+3. **Reverse proxy exposes host-root asset links** proxying **`https://<hostname>/.well-known/assetlinks.json`** to WireGuard UI's **`http://backend:PORT/.well-known/assetlinks.json`**. **`https://hostname/wg/.well-known`** is **ignored** by Android's association crawler.
+4. **Mirror workaround:** If you truly cannot terminate **`/.well-known`** directly on WireGuard UI, **`GET https://vpn.example.net/wg/.well-known/assetlinks.json`** (duplicate route emitted when **`BASE_PATH=/wg`**; adjust path for your **`BASE_PATH`**) returns the identical JSON blob you can synchronize to **`https://vpn.example.net/.well-known/assetlinks.json`** elsewhere.
+
+**Behavior implemented in WireGuard UI**
+
+| Mechanism | Role |
+|-----------|------|
+| **`GET` / `HEAD`** **`/.well-known/assetlinks.json`** | Issues Digital Asset Links JSON including **`delegate_permission/common.get_login_creds`** plus **`delegate_permission/common.handle_all_urls`**. |
+| **`X-WGUI-WebAuthn-Public-Origin`** | Optional HTTPS-only hint validated against configured origins; forces rp host alignment when mobiles talk to **`https://LAN:port/wg`** but passkeys bind to **`https://vpn.example.com`**. If it disagrees with **`WGUI_WEBAUTHN_RP_ID`**, the hinted public host wins **for configuring WebAuthn** so Credential Manager **`rp.id`** verification matches **`assetlinks`**. Never trust arbitrary hosts blindly — values must already be admitted via **`WGUI_WEBAUTHN_RP_ORIGINS`**, **`WGUI_WEBAUTHN_RP_ID` hostname match**, or the inferred default origin header. |
+| **`android:apk-key-hash`** derived origins | For every SHA-256 entry in **`WGUI_ANDROID_PASSKEY_SHA256`**, append **`android:apk-key-hash:`** + URL-safe Base64 (**no padding**) of the raw digest to **`RPOrigins`**. |
+| **`RPAllowCrossOrigin`** | Enabled whenever **`WGUI_ANDROID_PASSKEY_SHA256`** is non-empty so Credential Manager payloads that declare **`crossOrigin`** in **`clientDataJSON`** pass verification once origins match.
+
+**Reverse proxy snippets**
+
+**Caddy (keep `/.well-known` on the apex host while `{BASE_PATH}` serves the UI — e.g. `/wg`)**
+
+```caddyfile
+vpn.example.net {
+	handle /.well-known/assetlinks.json {
+		reverse_proxy 127.0.0.1:5000
+	}
+	handle /wg* {
+		reverse_proxy 127.0.0.1:5000
+	}
+}
+```
+
+Replace **`127.0.0.1:5000`** with your **`BIND_ADDRESS`** target (`docker` internal hostname, upstream socket, etc.).
+
+**Apache / legacy `ProxyPass`**
+
+Enable **`mod_proxy`** + **`proxy_http`** (Debian/Ubuntu: `a2enmod proxy proxy_http`). Example:
+
+```apache
+SSLProxyEngine on
+ProxyPass        /.well-known/assetlinks.json http://127.0.0.1:5000/.well-known/assetlinks.json
+ProxyPassReverse /.well-known/assetlinks.json http://127.0.0.1:5000/.well-known/assetlinks.json
+```
+
+Place specific statements **above** wildcard **`ProxyPass /`** directives.
+
+Equivalent **Nginx** pattern:
+
+```nginx
+location = /.well-known/assetlinks.json {
+    proxy_pass http://127.0.0.1:5000/.well-known/assetlinks.json;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Verification (expect **`200`** and JSON body):
+
+```bash
+curl -sSIL https://vpn.example.net/.well-known/assetlinks.json
+curl -sS  https://vpn.example.net/.well-known/assetlinks.json
+# pipe through jq locally if installed for readability
+```
+
+**Login session cookie**
+
+The **`login/begin`** response sets a **`session`** cookie tying server-side **`SessionData`** to **`login/finish`**. The companion Flutter client keeps a Dio cookie jar; ensure reverse proxies propagate **`Cookie` / `Set-Cookie`** without stripping attributes. Tune **`WGUI_SESSION_COOKIE_*`** when browsers or SPA clients authenticate cross-site (`SameSite=None` + `Secure`).
+
+Logs: failing **`finish`** emits **`WARN [passkeys] login finish rejected ...`** with the verifier error (**origin**, **challenge**, **signature**) — correlate with timestamps while reproducing mobile flows.
+
+Companion UX reminders:
+
+- **`Passkey origin`** on the Flutter login sheet maps straight to **`X-WGUI-WebAuthn-Public-Origin`** whenever the HTTPS hostname used during browser enrollment differs from the API **`Host`**.
+- Supply **`Username`** + passkey for accounts whose authenticators are **non-discoverable** (typical hybrid web enrollments unless you forced resident keys).
+- After rotating TLS/proxy fingerprints, run **`adb shell pm verify-app-links --re-verify com.wireguardui.wireguard_ui_client`** so Android re-fetches statements (swap package id if customized).
+
+Additional documentation lives in **`wireguard-ui-android-client`** `README.md` (mobile-focused recap).
+
 ##### Caddy + Dynamic DNS (No-IP): quick HTTPS so Passkeys work
 
-Browsers treat Passkeys/WebAuthn as **[secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)** (`https://` on a hostname, or `http://localhost`). Plain `http://<tu-ip>` is **not** enough. Use a hostname (No-IP, DuckDNS, etc.), forward ports **80** and **443**, and terminate TLS with Caddy.
+Browsers treat Passkeys/WebAuthn as **[secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)** (`https://` on a hostname, or `http://localhost`). Plain `http://<your-ip>` is **not** enough. Use a hostname (No-IP, DuckDNS, etc.), forward ports **80** and **443**, and terminate TLS with Caddy.
 
 1. **No-IP (or similar)**  
-   Create `tuhost.ddns.net` (example), install the updater or rely on No-IP so the **A record** points to your **WAN** public IP.
+   Create `yourhost.ddns.net` (example), install the updater or rely on No-IP so the **A record** points to your **WAN** public IP.
 
 2. **Firewall / router**  
-   Forward **TCP 80** and **TCP 443** from the internet to the machine that runs Caddy (required for Let’s Encrypt HTTP-01 by default).
+   Forward **TCP 80** and **TCP 443** from the internet to the machine that runs Caddy (required for Let's Encrypt HTTP-01 by default).
 
 3. **Install Caddy**  
    Follow [Caddy install docs](https://caddyserver.com/docs/install) for your distro (official repo or package).
@@ -249,13 +399,13 @@ Browsers treat Passkeys/WebAuthn as **[secure context](https://developer.mozilla
 4. **`Caddyfile`** (minimal reverse proxy to WireGuard UI on loopback):
 
    ```caddyfile
-   tuhost.ddns.net {
+   yourhost.ddns.net {
        encode gzip
        reverse_proxy 127.0.0.1:5000
    }
    ```
 
-   Replace `tuhost.ddns.net` with your hostname and **`5000`** with the port where `wireguard-ui` listens (`BIND_ADDRESS`, e.g. `:5000` or `127.0.0.1:5000`).
+   Replace `yourhost.ddns.net` with your hostname and **`5000`** with the port where `wireguard-ui` listens (`BIND_ADDRESS`, e.g. `:5000` or `127.0.0.1:5000`).
 
 5. **(Optional, recommended)** Listen only on localhost so only Caddy exposes HTTPS:
 
@@ -263,19 +413,19 @@ Browsers treat Passkeys/WebAuthn as **[secure context](https://developer.mozilla
    BIND_ADDRESS=127.0.0.1:5000 ./wireguard-ui
    ```
 
-6. **Restart Caddy**, then open **`https://tuhost.ddns.net`** and confirm the browser shows a **valid lock** (no certificate warnings).
+6. **Restart Caddy**, then open **`https://yourhost.ddns.net`** and confirm the browser shows a **valid lock** (no certificate warnings).
 
 7. **`wireguard-ui` systemd** — set RP ID/origin to match **exactly** what users type in the browser:
 
    ```ini
    [Service]
-   Environment="WGUI_WEBAUTHN_RP_ID=tuhost.ddns.net"
-   Environment="WGUI_WEBAUTHN_RP_ORIGINS=https://tuhost.ddns.net"
+   Environment="WGUI_WEBAUTHN_RP_ID=yourhost.ddns.net"
+   Environment="WGUI_WEBAUTHN_RP_ORIGINS=https://yourhost.ddns.net"
    ```
 
    Then `daemon-reload` and `restart wireguard-ui`.
 
-8. **Inside the UI** — **Configuración** → enable **Passkeys** → **Aplicar config**. Then **Administración → Usuarios**: register a passkey per user. Login page will offer **Entrar con Passkey** once enabled.
+8. **Inside the UI** — **Settings** → enable **Passkeys** → **Apply config**. Then **Administration → Users**: register a passkey per user. The login page will offer **Sign in with Passkey** once enabled.
 
 If HTTPS still fails behind NAT, verify port 80 reaches Caddy on first certificate issuance; use `journalctl -u caddy -f` on errors.
 
@@ -284,13 +434,101 @@ If HTTPS still fails behind NAT, verify port 80 reaches Caddy on first certifica
 WireGuard-UI only takes care of configuration generation. On Linux you can enable in-process `wg syncconf` after apply (see variables above), or use systemd to watch for changes and restart the
 service. Following is an example:
 
-> **Note:** The **systemd** block below does **not** start the `wireguard-ui` web process. It only runs `systemctl restart wg-quick@wg0` when `wg0.conf` is modified on disk. The UI binary is a separate program (see **Run WireGuard-UI** above and **systemd unit for `wireguard-ui`** below).
+> **Note:** The **systemd** block below does **not** start the `wireguard-ui` web process. It only runs `systemctl restart wg-quick@wg0` when `wg0.conf` is modified on disk. The UI binary is a separate program (see **Run WireGuard-UI** above and **[systemd: install and enable the web service](#systemd-install-and-enable-the-web-service)**).
 
-### systemd unit for `wireguard-ui` (web app)
+### systemd: install and enable the web service
 
-The app stores its JSON database under **`./db` relative to the process working directory**, so the unit should set `WorkingDirectory` to a folder you own (e.g. `/var/lib/wireguard-ui`) and place the binary on your `PATH` or use an absolute `ExecStart`.
+This section is about the **wireguard-ui HTTP process** (the web UI), not the optional **`wg-quick@`** watcher described later.
 
-Example `/etc/systemd/system/wireguard-ui.service`:
+#### What systemd must provide
+
+1. **Working directory** — The app opens its JSON store at **`./db`** relative to the current working directory (`jsondb.New("./db")` in `main.go`). The unit **must** set `WorkingDirectory` to a persistent directory owned by the service user (e.g. `/var/lib/wireguard-ui`). If you omit this, the database lands wherever systemd’s default cwd is (often `/` or `/root`), which is easy to misplace or permission incorrectly.
+2. **Binary** — Install the release binary (or your own build after `./prepare_assets.sh`) to a fixed path, e.g. **`/usr/local/bin/wireguard-ui`**, mode `0755`.
+3. **Environment** — All knobs (`BASE_PATH`, `BIND_ADDRESS`, `SESSION_SECRET`, `WGUI_*`, `FCM_CREDENTIALS_FILE`, etc.) are ordinary **process environment variables**. Set them with `Environment=` lines in the unit, or load a file with **`EnvironmentFile=`**.
+
+#### Register the service (step by step)
+
+1. **Create an unprivileged account and data directory** (recommended). The home directory doubles as **`WorkingDirectory`** / database location:
+
+   ```bash
+   sudo useradd --system --create-home --home-dir /var/lib/wireguard-ui \
+     --shell /usr/sbin/nologin --user-group wireguard-ui
+   sudo chmod 750 /var/lib/wireguard-ui
+   ```
+
+   If the user already exists, ensure **`/var/lib/wireguard-ui`** exists and is owned by **`wireguard-ui:wireguard-ui`** with mode **`0750`**.
+
+2. **Install the binary**:
+
+   ```bash
+   sudo install -m 0755 wireguard-ui /usr/local/bin/wireguard-ui
+   ```
+
+3. **Optional config directory** for secrets on disk (session key, Firebase JSON, Android SHA file, etc.):
+
+   ```bash
+   sudo mkdir -p /etc/wireguard-ui
+   sudo chown root:wireguard-ui /etc/wireguard-ui
+   sudo chmod 750 /etc/wireguard-ui
+   ```
+
+   Place secret files here and grant the **service user** read access (e.g. `chmod 640` and group `wireguard-ui`, or ownership `wireguard-ui:wireguard-ui` as appropriate). If a path is unreadable by the process user, features that read that file (session encryption, FCM, passkey asset links) will fail at runtime.
+
+4. **Environment file** — systemd reads **`KEY=value`** lines from `EnvironmentFile=` (comments with `#` allowed). You do **not** need `export`. Example **`/etc/default/wireguard-ui`** (Debian/Ubuntu naming is common; the path is arbitrary as long as the unit references it):
+
+   ```text
+   BIND_ADDRESS=127.0.0.1:5000
+   BASE_PATH=wg
+   SESSION_SECRET_FILE=/etc/wireguard-ui/session.secret
+   ```
+
+   Point `SESSION_SECRET` **or** `SESSION_SECRET_FILE` at a strong secret (see the environment table above). Same idea for `WGUI_PASSWORD_FILE`, `FCM_CREDENTIALS_FILE`, and **`WGUI_ANDROID_PASSKEY_SHA256`** (inline hex **or** absolute path to a file whose contents are the fingerprint string).
+
+5. **Unit file** — Create **`/etc/systemd/system/wireguard-ui.service`**:
+
+```ini
+[Unit]
+Description=WireGuard UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wireguard-ui
+Group=wireguard-ui
+WorkingDirectory=/var/lib/wireguard-ui
+EnvironmentFile=-/etc/default/wireguard-ui
+ExecStart=/usr/local/bin/wireguard-ui
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+   The `-` prefix on **`EnvironmentFile=-/etc/default/wireguard-ui`** means “ignore if missing” so the unit still parses before you create the file. You can instead use **`/etc/wireguard-ui.env`** or multiple `Environment="KEY=value"` lines for a minimal setup.
+
+6. **Reload systemd and start**:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now wireguard-ui
+   sudo systemctl status wireguard-ui
+   ```
+
+7. **Logs**:
+
+   ```bash
+   journalctl -u wireguard-ui -f
+   ```
+
+#### WireGuard config and `wg-quick` / `systemctl`
+
+If the UI should **write** `wg0.conf` (default **`/etc/wireguard/wg0.conf`**) or run **`wg-quick`** / **`systemctl restart wg-quick@…`**, the **`wireguard-ui` user** must be allowed to do so on your distribution (group membership on `/etc/wireguard`, `sudoers` for specific commands, or a documented choice to run the service as root — discouraged). There is no single recipe across distros; tighten permissions after verifying **Apply config** and optional **`WGUI_ALLOW_WG_QUICK`** / **`WGUI_WG_RESTART_VIA_SYSTEMD`** behaviour.
+
+#### Example unit without `EnvironmentFile` (inline bind only)
+
+The app stores its JSON database under **`./db` relative to the process working directory**, so `WorkingDirectory` is mandatory for a predictable data path.
 
 ```ini
 [Unit]
@@ -304,7 +542,6 @@ User=wireguard-ui
 Group=wireguard-ui
 WorkingDirectory=/var/lib/wireguard-ui
 Environment="BIND_ADDRESS=127.0.0.1:5000"
-# Optional: EnvironmentFile=-/etc/wireguard-ui.env
 ExecStart=/usr/local/bin/wireguard-ui
 Restart=on-failure
 RestartSec=5
@@ -313,7 +550,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Create the data directory and user as needed (names are examples), then `systemctl daemon-reload`, `systemctl enable --now wireguard-ui`.
+Then `systemctl daemon-reload` and `systemctl enable --now wireguard-ui` as above.
 
 ### Using systemd (restart `wg-quick` when config file changes)
 

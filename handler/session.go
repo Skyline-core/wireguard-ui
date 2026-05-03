@@ -130,11 +130,10 @@ func doRefreshSession(c echo.Context) {
 
 	sess.Values["updated_at"] = now
 	sess.Options = &sessions.Options{
-		Path:     cookiePath,
-		MaxAge:   maxAge,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Path:   cookiePath,
+		MaxAge: maxAge,
 	}
+	util.ApplySessionSecureFlags(sess.Options)
 	sess.Save(c.Request(), c.Response())
 
 	cookie := new(http.Cookie)
@@ -142,8 +141,7 @@ func doRefreshSession(c echo.Context) {
 	cookie.Path = cookiePath
 	cookie.Value = oldCookie.Value
 	cookie.MaxAge = maxAge
-	cookie.HttpOnly = true
-	cookie.SameSite = http.SameSiteLaxMode
+	util.ApplySessionHTTPFlags(cookie)
 	c.SetCookie(cookie)
 }
 
@@ -185,11 +183,10 @@ func touchSessionIdle(c echo.Context) {
 
 	cookiePath := util.GetCookiePath()
 	sess.Options = &sessions.Options{
-		Path:     cookiePath,
-		MaxAge:   maxAge,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Path:   cookiePath,
+		MaxAge: maxAge,
 	}
+	util.ApplySessionSecureFlags(sess.Options)
 	if err := sess.Save(c.Request(), c.Response()); err != nil {
 		return
 	}
@@ -199,8 +196,7 @@ func touchSessionIdle(c echo.Context) {
 	cookie.Path = cookiePath
 	cookie.Value = oldCookie.Value
 	cookie.MaxAge = maxAge
-	cookie.HttpOnly = true
-	cookie.SameSite = http.SameSiteLaxMode
+	util.ApplySessionHTTPFlags(cookie)
 	c.SetCookie(cookie)
 }
 
@@ -294,11 +290,10 @@ func clearSession(c echo.Context) {
 	sess.Values["max_age"] = -1
 	cookiePath := util.GetCookiePath()
 	sess.Options = &sessions.Options{
-		Path:     cookiePath,
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Path:   cookiePath,
+		MaxAge: -1,
 	}
+	util.ApplySessionSecureFlags(sess.Options)
 	sess.Save(c.Request(), c.Response())
 
 	cookie, err := c.Cookie("session_token")
@@ -309,7 +304,6 @@ func clearSession(c echo.Context) {
 	cookie.Name = "session_token"
 	cookie.Path = cookiePath
 	cookie.MaxAge = -1
-	cookie.HttpOnly = true
-	cookie.SameSite = http.SameSiteLaxMode
+	util.ApplySessionHTTPFlags(cookie)
 	c.SetCookie(cookie)
 }

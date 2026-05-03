@@ -149,11 +149,11 @@ function renderClientList(data, peerTraffic) {
         var globalDnsHint = $('#wg-global-dns').length ? String($('#wg-global-dns').val() || '').trim() : '';
         var dnsTxt;
         if (!c.use_server_dns) {
-            dnsTxt = 'No usa servidor';
+            dnsTxt = wgT('helper.dns_no_server');
         } else if (globalDnsHint.length > 0) {
             dnsTxt = globalDnsHint;
         } else {
-            dnsTxt = 'DNS servidor (lista vacía)';
+            dnsTxt = wgT('helper.dns_empty_list');
         }
         var dnsCell = '<div class="cff-v" style="color:#EF5350;font-weight:600">' + wgEscapeHtml(dnsTxt) + '</div>';
         var kaSec = $('#wg-global-keepalive-sec').length ? String($('#wg-global-keepalive-sec').val() || '').trim() : '';

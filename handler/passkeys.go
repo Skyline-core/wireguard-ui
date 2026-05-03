@@ -3,10 +3,13 @@ package handler
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/ngoduykhanh/wireguard-ui/locale"
 	"github.com/ngoduykhanh/wireguard-ui/model"
 	"github.com/ngoduykhanh/wireguard-ui/store"
 	"github.com/ngoduykhanh/wireguard-ui/util"
@@ -73,21 +77,44 @@ func (w webAuthnUser) WebAuthnCredentials() []webauthn.Credential {
 }
 func (w webAuthnUser) WebAuthnIcon() string { return "" }
 
-func webauthnForRequest(c echo.Context) (*webauthn.WebAuthn, error) {
-	host := c.Request().Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = c.Request().Host
+// androidApkOriginsFromPasskeySHA256Env builds WebAuthn origins for Credential Manager using the Android app
+// signing key (same hex SHA-256 as WGUI_ANDROID_PASSKEY_SHA256 / assetlinks). ClientDataJSON.origin for native
+// login is typically "android:apk-key-hash:"+base64url(SHA256(cert)) — see FullyQualifiedOrigin in go-webauthn.
+func androidApkOriginsFromPasskeySHA256Env() []string {
+	csv := util.AndroidPasskeySHA256FingerprintsCSV()
+	if csv == "" {
+		return nil
 	}
-	if strings.Contains(host, ",") {
-		host = strings.TrimSpace(strings.Split(host, ",")[0])
+	var out []string
+	for _, frag := range strings.Split(csv, ",") {
+		fp, err := normalizeAndroidCertFingerprint(strings.TrimSpace(frag))
+		if err != nil {
+			continue
+		}
+		raw, err := hex.DecodeString(strings.ReplaceAll(fp, ":", ""))
+		if err != nil || len(raw) != sha256digestLen {
+			continue
+		}
+		out = append(out, androidApkOriginPrefix+base64.RawURLEncoding.EncodeToString(raw))
 	}
-	if strings.Contains(host, ":") {
-		host = strings.Split(host, ":")[0]
-	}
-	if host == "" {
-		host = "localhost"
-	}
+	return out
+}
 
+const (
+	sha256digestLen       = 32
+	androidApkOriginPrefix = "android:apk-key-hash:"
+)
+
+func rpOriginsContainsExact(origins []string, needle string) bool {
+	for _, o := range origins {
+		if o == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func webauthnForRequest(c echo.Context) (*webauthn.WebAuthn, error) {
 	reqHost := c.Request().Header.Get("X-Forwarded-Host")
 	if reqHost == "" {
 		reqHost = c.Request().Host
@@ -103,19 +130,157 @@ func webauthnForRequest(c echo.Context) (*webauthn.WebAuthn, error) {
 			proto = "http"
 		}
 	}
-	origin := proto + "://" + reqHost
+	proto = strings.TrimSpace(strings.ToLower(proto))
 
-	rpID := util.LookupEnvOrString(util.WebAuthnRPIDEnvVar, host)
-	rpDisplayName := util.LookupEnvOrString(util.WebAuthnRPDisplayNameEnvVar, "WireGuard UI")
-	rpOrigins := util.LookupEnvOrStrings(util.WebAuthnRPOriginsEnvVar, []string{origin})
-	if len(rpOrigins) == 0 {
-		rpOrigins = []string{origin}
+	defaultOrigin := webauthnBuildOrigin(proto, reqHost)
+	rpHost := webauthnHostOnlyFromRequest(reqHost)
+	if rpHost == "" {
+		rpHost = "localhost"
 	}
+
+	rpDisplayName := util.LookupEnvOrString(util.WebAuthnRPDisplayNameEnvVar, "WireGuard UI")
+	envRPID := util.LookupEnvOrString(util.WebAuthnRPIDEnvVar, "")
+
+	rpOrigins := trimOriginList(util.LookupEnvOrStrings(util.WebAuthnRPOriginsEnvVar, []string{defaultOrigin}))
+	if len(rpOrigins) == 0 {
+		rpOrigins = []string{defaultOrigin}
+	}
+
+	mobileRpHostForced := false
+	if hint := strings.TrimSpace(c.Request().Header.Get(util.WebAuthnPublicOriginHeader)); hint != "" {
+		norm, err := normalizeWebAuthnOrigin(hint)
+		if err == nil && mobilePasskeyOriginTrusted(norm, rpOrigins, envRPID, defaultOrigin) {
+			mobileRpHostForced = true
+			if u, errP := url.Parse(norm); errP == nil && u.Hostname() != "" {
+				rpHost = u.Hostname()
+			}
+			if !originListContainsNormalized(rpOrigins, norm) {
+				rpOrigins = append([]string{norm}, rpOrigins...)
+			}
+		}
+	}
+
+	// Credential Manager verifies https://<rpId>/.well-known/assetlinks.json. That host must match
+	// rp.id in WebAuthn options. If clients send X-WGUI-WebAuthn-Public-Origin (public HTTPS host)
+	// but WGUI_WEBAUTHN_RP_ID was set for an internal LAN hostname, rp.id would mismatch and Android
+	// raises "RP ID cannot be validated" before the assertion reaches our server.
+	rpID := strings.TrimSpace(envRPID)
+	if rpID == "" {
+		rpID = rpHost
+	} else if mobileRpHostForced && rpHost != "" &&
+		!strings.EqualFold(hostOnlyRPID(rpID), rpHost) {
+		log.Warnf("[passkeys] WGUI_WEBAUTHN_RP_ID %q disagrees with %s rp host %q; using hinted host so Android Credential Manager can validate RP ID",
+			rpID, util.WebAuthnPublicOriginHeader, rpHost)
+		rpID = rpHost
+	}
+
+	androidConfigured := strings.TrimSpace(util.AndroidPasskeySHA256FingerprintsCSV()) != ""
+	for _, ao := range androidApkOriginsFromPasskeySHA256Env() {
+		if !rpOriginsContainsExact(rpOrigins, ao) {
+			rpOrigins = append(rpOrigins, ao)
+		}
+	}
+
 	return webauthn.New(&webauthn.Config{
 		RPDisplayName: rpDisplayName,
 		RPID:          rpID,
 		RPOrigins:     rpOrigins,
+		// Hybrid / native Credential Manager assertions may set CollectedClientData.crossOrigin=true.
+		RPAllowCrossOrigin: androidConfigured,
 	})
+}
+
+func webauthnBuildOrigin(proto, hostPort string) string {
+	u := &url.URL{Scheme: proto, Host: strings.TrimSpace(hostPort)}
+	return strings.TrimSuffix(u.String(), "/")
+}
+
+func webauthnHostOnlyFromRequest(hostPort string) string {
+	hostPort = strings.TrimSpace(hostPort)
+	if hostPort == "" {
+		return ""
+	}
+	h, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		if i := strings.LastIndex(hostPort, ":"); i > 0 && !strings.HasPrefix(hostPort, "[") {
+			return strings.ToLower(hostPort[:i])
+		}
+		return strings.ToLower(hostPort)
+	}
+	return strings.ToLower(h)
+}
+
+func trimOriginList(origins []string) []string {
+	out := make([]string, 0, len(origins))
+	for _, o := range origins {
+		s := strings.TrimSpace(o)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func normalizeWebAuthnOrigin(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", fmt.Errorf("empty origin")
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid origin")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("invalid origin host")
+	}
+	port := u.Port()
+	if scheme != "https" && !(scheme == "http" && (host == "localhost" || strings.HasPrefix(host, "127."))) {
+		return "", fmt.Errorf("origin must use https (http allowed only for localhost)")
+	}
+	if port != "" && !((scheme == "https" && port == "443") || (scheme == "http" && port == "80")) {
+		return fmt.Sprintf("%s://%s:%s", scheme, host, port), nil
+	}
+	return scheme + "://" + host, nil
+}
+
+func originListContainsNormalized(origins []string, norm string) bool {
+	for _, o := range origins {
+		no, err := normalizeWebAuthnOrigin(strings.TrimSpace(o))
+		if err == nil && strings.EqualFold(no, norm) {
+			return true
+		}
+	}
+	return false
+}
+
+func hostOnlyRPID(rp string) string {
+	rp = strings.TrimSpace(strings.ToLower(rp))
+	if rp == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(rp); err == nil {
+		return h
+	}
+	return rp
+}
+
+func mobilePasskeyOriginTrusted(norm string, rpOrigins []string, envRPID string, defaultOrigin string) bool {
+	if originListContainsNormalized(rpOrigins, norm) {
+		return true
+	}
+	if envRPID != "" {
+		if u, err := url.Parse(norm); err == nil {
+			if strings.EqualFold(u.Hostname(), hostOnlyRPID(envRPID)) {
+				return true
+			}
+		}
+	}
+	if do, err := normalizeWebAuthnOrigin(defaultOrigin); err == nil && strings.EqualFold(do, norm) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimRight(defaultOrigin, "/"), strings.TrimRight(norm, "/"))
 }
 
 func setLoginSession(c echo.Context, dbuser model.User, rememberMe bool, sessionTimeoutMinutes int) error {
@@ -136,11 +301,10 @@ func setLoginSession(c echo.Context, dbuser model.User, rememberMe bool, session
 	cookiePath := util.GetCookiePath()
 	sess, _ := session.Get("session", c)
 	sess.Options = &sessions.Options{
-		Path:     cookiePath,
-		MaxAge:   ageMax,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Path:   cookiePath,
+		MaxAge: ageMax,
 	}
+	util.ApplySessionSecureFlags(sess.Options)
 
 	tokenUID := xid.New().String()
 	now := time.Now().UTC().Unix()
@@ -164,8 +328,7 @@ func setLoginSession(c echo.Context, dbuser model.User, rememberMe bool, session
 	cookie.Path = cookiePath
 	cookie.Value = tokenUID
 	cookie.MaxAge = ageMax
-	cookie.HttpOnly = true
-	cookie.SameSite = http.SameSiteLaxMode
+	util.ApplySessionHTTPFlags(cookie)
 	c.SetCookie(cookie)
 	return nil
 }
@@ -311,6 +474,7 @@ func PasskeyRemove(db store.IStore) echo.HandlerFunc {
 		if !globalSettings.TOTPEnabled {
 			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "Passkeys are disabled in settings"})
 		}
+		lang := locale.Normalize(globalSettings.UILanguage)
 		var body struct {
 			Username     string `json:"username"`
 			CredentialID string `json:"credential_id"`
@@ -357,11 +521,11 @@ func PasskeyRemove(db store.IStore) echo.HandlerFunc {
 			clearSession(c)
 			return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
 				Status:         true,
-				Message:        "Passkey eliminada. Vuelve a iniciar sesión.",
+				Message:        locale.T(lang, "api.passkey_removed_reauth"),
 				Reauthenticate: true,
 			})
 		}
-		return c.JSON(http.StatusOK, jsonHTTPResponse{Status: true, Message: "Passkey eliminada; sesiones del usuario revocadas"})
+		return c.JSON(http.StatusOK, jsonHTTPResponse{Status: true, Message: locale.T(lang, "api.passkey_removed_sessions_revoked")})
 	}
 }
 
@@ -421,6 +585,31 @@ func PasskeyRename(db store.IStore) echo.HandlerFunc {
 }
 
 const passkeyDiscoverableSessionKey = "passkey_login_discoverable"
+
+// passkeyAssertionAllowList builds allowCredentials for username-based login.
+// Credentials registered in some browsers omit transports in storage; Credential Manager on Android then
+// may not surface them for synced/platform passkeys unless we widen allowed transports when empty.
+func passkeyAssertionAllowList(creds []webauthn.Credential) []protocol.CredentialDescriptor {
+	if len(creds) == 0 {
+		return nil
+	}
+	whenEmpty := []protocol.AuthenticatorTransport{
+		protocol.Internal,
+		protocol.Hybrid,
+		protocol.USB,
+		protocol.NFC,
+		protocol.BLE,
+	}
+	out := make([]protocol.CredentialDescriptor, 0, len(creds))
+	for i := range creds {
+		d := creds[i].Descriptor()
+		if len(d.Transport) == 0 {
+			d.Transport = whenEmpty
+		}
+		out = append(out, d)
+	}
+	return out
+}
 
 func discoverableUserLookup(db store.IStore) func(rawID, userHandle []byte) (webauthn.User, error) {
 	return func(rawID, userHandle []byte) (webauthn.User, error) {
@@ -483,7 +672,10 @@ func PasskeyBeginLogin(db store.IStore) echo.HandlerFunc {
 		if len(u.Passkeys) == 0 {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "No passkey registered for this user"})
 		}
-		opts, sessionData, err := wa.BeginLogin(webAuthnUser{u})
+		opts, sessionData, err := wa.BeginLogin(
+			webAuthnUser{u},
+			webauthn.WithAllowedCredentials(passkeyAssertionAllowList(u.Passkeys)),
+		)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
 		}
@@ -538,7 +730,7 @@ func PasskeyFinishLogin(db store.IStore) echo.HandlerFunc {
 			}
 			wUser, cred, err := wa.FinishPasskeyLogin(discoverableUserLookup(db), sessionData, c.Request())
 			if err != nil {
-				log.Infof("Discoverable passkey login failed: %v", err)
+				log.Warnf("[passkeys] discoverable login finish rejected: %v", err)
 				return c.JSON(http.StatusUnauthorized, jsonHTTPResponse{false, "Invalid passkey"})
 			}
 			wu, ok := wUser.(webAuthnUser)
@@ -586,7 +778,7 @@ func PasskeyFinishLogin(db store.IStore) echo.HandlerFunc {
 		}
 		cred, err := wa.FinishLogin(webAuthnUser{u}, sessionData, c.Request())
 		if err != nil {
-			log.Infof("Passkey login failed for %s: %v", username, err)
+			log.Warnf("[passkeys] login finish rejected for %s: %v", username, err)
 			return c.JSON(http.StatusUnauthorized, jsonHTTPResponse{false, "Invalid passkey"})
 		}
 		if err := setLoginSession(c, u, rememberMe, globalSettings.SessionTimeoutMinutes); err != nil {

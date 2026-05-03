@@ -265,8 +265,8 @@
       var p = peers[j] || {};
       var pub = String(p.public_key || '');
       var nm = pub ? (peerNameByPub[pub] || wgT('traffic.peer_fallback')) : wgT('traffic.peer_fallback');
-      var rxBytes = Number(p.tx_bytes || 0); // descarga (peer) = TX servidor
-      var txBytes = Number(p.rx_bytes || 0); // subida (peer) = RX servidor
+      var rxBytes = Number(p.tx_bytes || 0); // peer download = server TX
+      var txBytes = Number(p.rx_bytes || 0); // peer upload = server RX
       var upH = (rxBytes / maxPeerBytes) * 50;   // top half (descarga)
       var downH = (txBytes / maxPeerBytes) * 50; // bottom half (subida)
 

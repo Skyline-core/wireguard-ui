@@ -92,6 +92,11 @@ input[type=checkbox].wg-toggle:checked::after{left:22px;background:#EF5350;}
             {{end}}
             {{end}}
                             </div>
+            {{if $.allowWgQuick}}
+            <div class="wg-srv-ban-meta" style="flex-basis:100%;margin-top:10px;">
+                {{ tr $.UILang "server.quick_actions_note" }}
+            </div>
+            {{end}}
                             </div>
     {{ end }}
 

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"text/template"
@@ -56,11 +58,37 @@ func (t *TemplateRegistry) Render(w io.Writer, name string, data interface{}, c 
 func New(tmplDir fs.FS, extraData map[string]interface{}, secret [64]byte) *echo.Echo {
 	e := echo.New()
 
+	if raw := strings.TrimSpace(os.Getenv("WGUI_FLUTTER_WEB_ORIGINS")); raw != "" {
+		chunks := strings.Split(raw, ",")
+		var origins []string
+		for _, p := range chunks {
+			o := strings.TrimSpace(p)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+		if len(origins) > 0 {
+			e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+				AllowOrigins: origins,
+				AllowMethods: []string{
+					http.MethodGet, http.MethodPost, http.MethodHead, http.MethodOptions,
+				},
+				AllowCredentials: true,
+				AllowHeaders: []string{
+					echo.HeaderOrigin,
+					echo.HeaderContentType,
+					echo.HeaderAccept,
+					echo.HeaderCookie,
+				},
+			}))
+		}
+	}
+
 	cookiePath := util.GetCookiePath()
 
 	cookieStore := sessions.NewCookieStore(secret[:32], secret[32:])
 	cookieStore.Options.Path = cookiePath
-	cookieStore.Options.HttpOnly = true
+	util.ApplySessionSecureFlags(cookieStore.Options)
 	cookieStore.MaxAge(86400 * 7)
 
 	e.Use(session.Middleware(cookieStore))

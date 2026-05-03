@@ -323,6 +323,14 @@ func (c *trafficCache) refreshOnce() error {
 	return nil
 }
 
+// rangeCfg defines sliding windows over fixed 30-minute base buckets (see baseBucketMs).
+// Peer/volume totals (peer_totals, buckets) sum/traffic only inside windowBaseBuckets slots ending “now”.
+//
+//	24h: 48×30min = 24h, one bar per 30min.
+//	7d:  336×30min = 7d, groupFactor 6 → each displayed bar covers 6 buckets (3h); 56 bars.
+//	30d: 1440×30min = 30d, groupFactor 24 → each bar covers 12h; 60 bars.
+//
+// Query param ?range=24h|7d|30d selects which window buildSeries uses (GetTrafficSeries).
 func rangeCfg(r TrafficRange) (windowBaseBuckets int, displayCount int, groupFactor int, ok bool) {
 	switch r {
 	case TrafficRange24h:

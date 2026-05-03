@@ -72,6 +72,8 @@ const (
 	WebAuthnRPIDEnvVar                     = "WGUI_WEBAUTHN_RP_ID"
 	WebAuthnRPOriginsEnvVar                = "WGUI_WEBAUTHN_RP_ORIGINS"
 	WebAuthnRPDisplayNameEnvVar            = "WGUI_WEBAUTHN_RP_DISPLAY_NAME"
+	// WebAuthnPublicOriginHeader optional HTTPS origin from trusted mobile clients (validated against RP origins / RP ID).
+	WebAuthnPublicOriginHeader = "X-WGUI-WebAuthn-Public-Origin"
 	// SyncConfAfterApplyEnvVar: if set, parse as bool — run wg-quick strip | wg syncconf after writing wg.conf (“Apply config”).
 	// If unset, defaults to matching WGUI_ALLOW_WG_QUICK so peers update in-kernel without full restart when host tools exist.
 	SyncConfAfterApplyEnvVar = "WGUI_WG_SYNCCONF_AFTER_APPLY"

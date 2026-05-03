@@ -35,7 +35,7 @@ type WGDeviceVM struct {
 	Peers []WGPeerVM
 }
 
-// ServerBannerVM summarizes kernel WireGuard presence for the Servidor status stripe.
+// ServerBannerVM summarizes kernel WireGuard presence for the Server page status stripe.
 type ServerBannerVM struct {
 	IfaceWant        string
 	IsListening      bool // interface found in wgctrl

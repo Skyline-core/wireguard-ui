@@ -31,6 +31,7 @@ import (
 	"github.com/ngoduykhanh/wireguard-ui/emailer"
 	"github.com/ngoduykhanh/wireguard-ui/locale"
 	"github.com/ngoduykhanh/wireguard-ui/model"
+	"github.com/ngoduykhanh/wireguard-ui/pushnotify"
 	"github.com/ngoduykhanh/wireguard-ui/store"
 	"github.com/ngoduykhanh/wireguard-ui/telegram"
 	"github.com/ngoduykhanh/wireguard-ui/util"
@@ -68,7 +69,7 @@ func ensureCanDemote(db store.IStore, adminUsername string) error {
 }
 
 // ensureLeavingActiveAdminWhenDisabling forbids disabling the last remaining active administrator.
-func ensureLeavingActiveAdminWhenDisabling(db store.IStore, targetUsername string) error {
+func ensureLeavingActiveAdminWhenDisabling(db store.IStore, targetUsername, lang string) error {
 	target, err := db.GetUserByName(targetUsername)
 	if err != nil {
 		return err
@@ -90,7 +91,7 @@ func ensureLeavingActiveAdminWhenDisabling(db store.IStore, targetUsername strin
 		}
 	}
 	if others < 1 {
-		return fmt.Errorf("debe haber al menos otro administrador activo antes de deshabilitar a este usuario")
+		return fmt.Errorf("%s", locale.T(lang, "api.need_another_active_admin"))
 	}
 	return nil
 }
@@ -272,6 +273,7 @@ func Login(db store.IStore) echo.HandlerFunc {
 		password := data["password"].(string)
 		rememberMe := data["rememberMe"].(bool)
 		globalSettings, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(globalSettings.UILanguage)
 
 		if !usernameRegexp.MatchString(username) {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid username"})
@@ -298,7 +300,7 @@ func Login(db store.IStore) echo.HandlerFunc {
 
 		if userCorrect && passwordCorrect {
 			if dbuser.Disabled {
-				return c.JSON(http.StatusUnauthorized, jsonHTTPResponse{false, "Cuenta deshabilitada"})
+				return c.JSON(http.StatusUnauthorized, jsonHTTPResponse{false, locale.T(lang, "api.account_disabled")})
 			}
 			if err := setLoginSession(c, dbuser, rememberMe, globalSettings.SessionTimeoutMinutes); err != nil {
 				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, fmt.Sprintf("Cannot set session: %v", err)})
@@ -409,6 +411,9 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
 		}
 
+		gsLang, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gsLang.UILanguage)
+
 		username, _ := data["username"].(string)
 		password, _ := data["password"].(string)
 		previousUsername, _ := data["previous_username"].(string)
@@ -479,7 +484,7 @@ func UpdateUser(db store.IStore) echo.HandlerFunc {
 				clearSession(c)
 				return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
 					Status:         true,
-					Message:        "Contraseña actualizada. Vuelve a iniciar sesión.",
+					Message:        locale.T(lang, "api.password_updated_reauth"),
 					Reauthenticate: true,
 				})
 			}
@@ -637,6 +642,8 @@ func SetUserDisabled(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
 		}
 		me := currentUser(c)
+		gs, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gs.UILanguage)
 		if !body.Disabled {
 			u.Disabled = false
 			if err := db.SaveUser(u); err != nil {
@@ -645,12 +652,12 @@ func SetUserDisabled(db store.IStore) echo.HandlerFunc {
 			if target == me {
 				setUser(c, u.Username, u.Admin, util.GetDBUserCRC32(u))
 			}
-			return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Usuario habilitado"})
+			return c.JSON(http.StatusOK, jsonHTTPResponse{true, locale.T(lang, "api.user_enabled")})
 		}
 		if u.Disabled {
-			return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Sin cambios"})
+			return c.JSON(http.StatusOK, jsonHTTPResponse{true, locale.T(lang, "api.no_change")})
 		}
-		if err := ensureLeavingActiveAdminWhenDisabling(db, target); err != nil {
+		if err := ensureLeavingActiveAdminWhenDisabling(db, target, lang); err != nil {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
 		}
 		u.Disabled = true
@@ -661,11 +668,11 @@ func SetUserDisabled(db store.IStore) echo.HandlerFunc {
 			clearSession(c)
 			return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
 				Status:         true,
-				Message:        "Tu cuenta fue deshabilitada. Vuelve a iniciar sesión cuando un administrador te reactive.",
+				Message:        locale.T(lang, "api.account_disabled_admin_reactive"),
 				Reauthenticate: true,
 			})
 		}
-		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Usuario deshabilitado"})
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, locale.T(lang, "api.user_disabled")})
 	}
 }
 
@@ -686,8 +693,10 @@ func RevokeUserSessions(db store.IStore) echo.HandlerFunc {
 		if err != nil {
 			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
 		}
+		gs, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gs.UILanguage)
 		if u.Disabled {
-			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "El usuario está deshabilitado; no tiene sesiones activas válidas"})
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, locale.T(lang, "api.disabled_no_valid_sessions")})
 		}
 		u.AuthEpoch++
 		if err := db.SaveUser(u); err != nil {
@@ -698,11 +707,11 @@ func RevokeUserSessions(db store.IStore) echo.HandlerFunc {
 			clearSession(c)
 			return c.JSON(http.StatusOK, jsonHTTPReauthenticate{
 				Status:         true,
-				Message:        "Sesión revocada. Vuelve a iniciar sesión.",
+				Message:        locale.T(lang, "api.session_revoked_reauth"),
 				Reauthenticate: true,
 			})
 		}
-		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Sesiones del usuario cerradas"})
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, locale.T(lang, "api.user_sessions_revoked")})
 	}
 }
 
@@ -717,12 +726,13 @@ func WireGuardClients(db store.IStore) echo.HandlerFunc {
 		}
 
 		globalSettings, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(globalSettings.UILanguage)
 
 		return renderShell(c, db, "clients.html", map[string]interface{}{
 			"baseData":       model.BaseData{Active: "clients", CurrentUser: currentUser(c), Admin: isAdmin(c)},
 			"clientDataList": clientDataList,
 			"globalSettings": globalSettings,
-			"page_subtitle":  "Gestión de peers y configuraciones",
+			"page_subtitle":  locale.T(lang, "page.clients_sub"),
 		})
 	}
 }
@@ -730,6 +740,9 @@ func WireGuardClients(db store.IStore) echo.HandlerFunc {
 // Dashboard main summary page (mock shell).
 func Dashboard(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		gsUI, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gsUI.UILanguage)
+
 		clientDataList, err := db.GetClients(true)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, fmt.Sprintf("Cannot get client list: %v", err)})
@@ -742,7 +755,7 @@ func Dashboard(db store.IStore) echo.HandlerFunc {
 		if dberr != nil {
 			return renderShellErr(c, db, http.StatusInternalServerError, "dashboard.html", map[string]interface{}{
 				"baseData":      model.BaseData{Active: "dashboard", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-				"page_subtitle": "Resumen del sistema",
+				"page_subtitle": locale.T(lang, "page.dashboard_sub"),
 				"error":         dberr.Error(),
 			})
 		}
@@ -807,7 +820,7 @@ func Dashboard(db store.IStore) echo.HandlerFunc {
 
 		return renderShell(c, db, "dashboard.html", map[string]interface{}{
 			"baseData":            model.BaseData{Active: "dashboard", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle":       "Resumen del sistema",
+			"page_subtitle":       locale.T(lang, "page.dashboard_sub"),
 			"clientDataList":      clientDataList,
 			"recentClients":       recentClients,
 			"onlinePeerByPubKey":  onlineByPub,
@@ -832,11 +845,14 @@ func Dashboard(db store.IStore) echo.HandlerFunc {
 // TrafficPage bandwidth-style view using live wg stats plus client names.
 func TrafficPage(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		gsUI, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gsUI.UILanguage)
+
 		devicesVm, wgErr, dberr := GatherWireGuardStatusDevices(db, c)
 		if dberr != nil {
 			return renderShellErr(c, db, http.StatusInternalServerError, "traffic.html", map[string]interface{}{
 				"baseData":      model.BaseData{Active: "traffic", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-				"page_subtitle": "Monitoreo de ancho de banda",
+				"page_subtitle": locale.T(lang, "page.traffic_sub"),
 				"error":         dberr.Error(),
 			})
 		}
@@ -851,7 +867,7 @@ func TrafficPage(db store.IStore) echo.HandlerFunc {
 
 		return renderShell(c, db, "traffic.html", map[string]interface{}{
 			"baseData":         model.BaseData{Active: "traffic", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle":    "Monitoreo de ancho de banda",
+			"page_subtitle":    locale.T(lang, "page.traffic_sub"),
 			"devices":          devicesVm,
 			"error":            wgErr,
 			"bytesReceived":    recvTotal,
@@ -864,12 +880,13 @@ func TrafficPage(db store.IStore) echo.HandlerFunc {
 func LogsPage(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		globalSettings, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(globalSettings.UILanguage)
 		iface := util.WireGuardIfaceBasename(globalSettings.ConfigFilePath)
 		systemSections := ReadSystemLogSections(iface)
 		lines := ReadLogTailLines(400)
 		return renderShell(c, db, "logs.html", map[string]interface{}{
 			"baseData":       model.BaseData{Active: "logs", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle":  "Registros en tiempo real de WireGuard / aplicación",
+			"page_subtitle":  locale.T(lang, "page.logs_sub"),
 			"ifaceName":      iface,
 			"systemSections": systemSections,
 			"logLines":       lines,
@@ -883,8 +900,9 @@ func LogsPage(db store.IStore) echo.HandlerFunc {
 func APISystemLogs(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		globalSettings, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(globalSettings.UILanguage)
 		if !globalSettings.RealtimeStatsEnabled {
-			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, "Monitoreo de logs desactivado en configuración"})
+			return c.JSON(http.StatusForbidden, jsonHTTPResponse{false, locale.T(lang, "api.logs_monitoring_disabled")})
 		}
 		iface := util.WireGuardIfaceBasename(globalSettings.ConfigFilePath)
 		sections := ReadSystemLogSections(iface)
@@ -895,6 +913,34 @@ func APISystemLogs(db store.IStore) echo.HandlerFunc {
 			"log_tail_unset": len(fileLines) == 0,
 			"iface_name":     iface,
 		})
+	}
+}
+
+// APISetRealtimeStatsEnabled sets only [model.GlobalSetting.RealtimeStatsEnabled] (logs + live API gate).
+// Same field as the web “live monitoring” toggle / nav Logs link. Admin-only; full read-modify-write to avoid
+// partial POST /global-settings wiping other fields.
+func APISetRealtimeStatsEnabled(db store.IStore) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		prev, err := db.GetGlobalSettings()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
+		}
+		var body struct {
+			Enabled bool `json:"realtime_stats_enabled"`
+		}
+		if err := c.Bind(&body); err != nil {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Invalid JSON"})
+		}
+		prev.RealtimeStatsEnabled = body.Enabled
+		prev.UpdatedAt = time.Now().UTC()
+		if err := db.SaveGlobalSettings(prev); err != nil {
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Cannot save global settings"})
+		}
+		if err := util.UpdateHashes(db); err != nil {
+			log.Errorf("UpdateHashes after realtime stats toggle: %v", err)
+			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Saved but failed to update pending state"})
+		}
+		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Updated global settings successfully"})
 	}
 }
 
@@ -1042,6 +1088,8 @@ func NewClient(db store.IStore) echo.HandlerFunc {
 			})
 		}
 		log.Infof("Created wireguard client: %v", client)
+		omitFCM := strings.TrimSpace(c.Request().Header.Get(pushnotify.HeaderXWGUIFCMToken))
+		pushnotify.PeerCreated(client.Name, omitFCM)
 
 		return c.JSON(http.StatusOK, client)
 	}
@@ -1264,18 +1312,25 @@ func UpdateClient(db store.IStore) echo.HandlerFunc {
 	}
 }
 
+type setClientStatusPayload struct {
+	ID     string `json:"id"`
+	Status bool   `json:"status"`
+}
+
 // SetClientStatus handler to enable / disable a client
 func SetClientStatus(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		data := make(map[string]interface{})
-		err := json.NewDecoder(c.Request().Body).Decode(&data)
-
-		if err != nil {
+		var payload setClientStatusPayload
+		if err := json.NewDecoder(c.Request().Body).Decode(&payload); err != nil {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Bad post data"})
 		}
 
-		clientID := data["id"].(string)
-		status := data["status"].(bool)
+		clientID := strings.TrimSpace(payload.ID)
+		status := payload.Status
+
+		if clientID == "" {
+			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid client ID"})
+		}
 
 		if _, err := xid.FromString(clientID); err != nil {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid client ID"})
@@ -1286,6 +1341,7 @@ func SetClientStatus(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, err.Error()})
 		}
 
+		wasEnabled := clientData.Client.Enabled
 		client := *clientData.Client
 
 		client.Enabled = status
@@ -1293,6 +1349,10 @@ func SetClientStatus(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
 		}
 		log.Infof("Changed client %s enabled status to %v", client.ID, status)
+		if wasEnabled != status {
+			omitFCM := strings.TrimSpace(c.Request().Header.Get(pushnotify.HeaderXWGUIFCMToken))
+			pushnotify.PeerEnableChanged(client.Name, status, omitFCM)
+		}
 
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Changed client status successfully"})
 	}
@@ -1416,6 +1476,11 @@ func RemoveClient(db store.IStore) echo.HandlerFunc {
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, "Please provide a valid client ID"})
 		}
 
+		var removedName string
+		if cd, err := db.GetClientByID(client.ID, model.QRCodeSettings{Enabled: false}); err == nil && cd.Client != nil {
+			removedName = cd.Client.Name
+		}
+
 		// delete client from database
 
 		if err := db.DeleteClient(client.ID); err != nil {
@@ -1424,6 +1489,8 @@ func RemoveClient(db store.IStore) echo.HandlerFunc {
 		}
 
 		log.Infof("Removed wireguard client: %v", client)
+		omitFCM := strings.TrimSpace(c.Request().Header.Get(pushnotify.HeaderXWGUIFCMToken))
+		pushnotify.PeerRemoved(removedName, omitFCM)
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Client removed"})
 	}
 }
@@ -1455,10 +1522,11 @@ func WireGuardServer(db store.IStore) echo.HandlerFunc {
 		}
 		banner := BuildServerBannerVM(ifaceName, devicesVm, wgErr, listenUDP, util.HostUptimeApprox())
 		dnsCsv := strings.Join(globalSettings.DNSServers, ", ")
+		lang := locale.Normalize(globalSettings.UILanguage)
 
 		return renderShell(c, db, "server.html", map[string]interface{}{
 			"baseData":          model.BaseData{Active: "wg-server", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle":     fmt.Sprintf("Configuración de %s", ifaceName),
+			"page_subtitle":     fmt.Sprintf(locale.T(lang, "page.server_sub_fmt"), ifaceName),
 			"serverInterface":   server.Interface,
 			"serverKeyPair":     server.KeyPair,
 			"globalSettings":    globalSettings,
@@ -1550,11 +1618,15 @@ func GlobalSettings(db store.IStore) echo.HandlerFunc {
 // Status handler
 func Status(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		gs, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gs.UILanguage)
+		sub := locale.T(lang, "page.status_sub")
+
 		devicesVm, wgErr, dbErr := GatherWireGuardStatusDevices(db, c)
 		if dbErr != nil {
 			return renderShellErr(c, db, http.StatusInternalServerError, "status.html", map[string]interface{}{
 				"baseData":      model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-				"page_subtitle": "Peers desde wgctrl (detalle tabla)",
+				"page_subtitle": sub,
 				"error":         dbErr.Error(),
 				"devices":       nil,
 			})
@@ -1562,7 +1634,7 @@ func Status(db store.IStore) echo.HandlerFunc {
 		if wgErr != "" {
 			return renderShellErr(c, db, http.StatusInternalServerError, "status.html", map[string]interface{}{
 				"baseData":      model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-				"page_subtitle": "Peers desde wgctrl (detalle tabla)",
+				"page_subtitle": sub,
 				"error":         wgErr,
 				"devices":       nil,
 			})
@@ -1570,7 +1642,7 @@ func Status(db store.IStore) echo.HandlerFunc {
 
 		return renderShell(c, db, "status.html", map[string]interface{}{
 			"baseData":      model.BaseData{Active: "status", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle": "Peers desde wgctrl (detalle tabla)",
+			"page_subtitle": sub,
 			"devices":       devicesVm,
 			"error":         "",
 		})
@@ -1644,10 +1716,11 @@ func GlobalSettingSubmit(db store.IStore) echo.HandlerFunc {
 		}
 
 		// Only when this submit runs (save footer), not when toggling off Passkeys without saving yet.
+		lang := locale.Normalize(globalSettings.UILanguage)
 		if disabledPasskeys {
 			if err := ClearStoredPasskeysForAllUsers(db); err != nil {
 				log.Errorf("clear passkeys after disabling Passkeys: %v", err)
-				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, "Ajustes guardados pero no se pudieron borrar las passkeys almacenadas"})
+				return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, locale.T(lang, "api.saved_passkeys_cleared_failed")})
 			}
 		}
 
@@ -1674,7 +1747,7 @@ func GlobalSettingSubmit(db store.IStore) echo.HandlerFunc {
 
 		msg := "Updated global settings successfully"
 		if disabledPasskeys {
-			msg = "Configuración guardada. Passkeys desactivadas y credenciales eliminadas. Puedes aplicar al kernel en el mismo paso."
+			msg = locale.T(lang, "api.global_saved_passkeys_disabled_kernel")
 		}
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, msg})
 	}
@@ -1981,6 +2054,16 @@ func WireGuardServerSave(db store.IStore, tmplDir fs.FS) echo.HandlerFunc {
 	}
 }
 
+// pushTunnelTransitionAfterWgQuick updates FCM tunnel notifications after wg-quick up/down from the API
+// (same logic as GET /api/wireguard/tunnel-status, but triggered immediately when the tunnel changes).
+func pushTunnelTransitionAfterWgQuick(db store.IStore) {
+	gs, err := db.GetGlobalSettings()
+	if err != nil {
+		return
+	}
+	pushnotify.TunnelRunningTransition(util.WgTunnelIsRunning(gs.ConfigFilePath))
+}
+
 // WireGuardQuickStop runs wg-quick down when WGUI_ALLOW_WG_QUICK=true.
 func WireGuardQuickStop(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -1992,6 +2075,7 @@ func WireGuardQuickStop(db store.IStore) echo.HandlerFunc {
 			log.Warn(err)
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
 		}
+		pushTunnelTransitionAfterWgQuick(db)
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Interfaz detenida (wg-quick down)"})
 	}
 }
@@ -2007,6 +2091,7 @@ func WireGuardQuickStart(db store.IStore) echo.HandlerFunc {
 			log.Warn(err)
 			return c.JSON(http.StatusBadRequest, jsonHTTPResponse{false, err.Error()})
 		}
+		pushTunnelTransitionAfterWgQuick(db)
 		return c.JSON(http.StatusOK, jsonHTTPResponse{true, "Interfaz iniciada (wg-quick up)"})
 	}
 }
@@ -2020,8 +2105,10 @@ func WireGuardTunnelStatus(db store.IStore) echo.HandlerFunc {
 		}
 		confPath := strings.TrimSpace(gs.ConfigFilePath)
 		iface := util.WireGuardIfaceBasename(confPath)
+		running := util.WgTunnelIsRunning(confPath)
+		pushnotify.TunnelRunningTransition(running)
 		return c.JSON(http.StatusOK, map[string]interface{}{
-			"tunnel_running": util.WgTunnelIsRunning(confPath),
+			"tunnel_running": running,
 			"iface_name":     iface,
 		})
 	}
@@ -2077,9 +2164,11 @@ func GetHashesChanges(db store.IStore) echo.HandlerFunc {
 // AboutPage handler
 func AboutPage(db store.IStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		gs, _ := db.GetGlobalSettings()
+		lang := locale.Normalize(gs.UILanguage)
 		return renderShell(c, db, "about.html", map[string]interface{}{
 			"baseData":      model.BaseData{Active: "about", CurrentUser: currentUser(c), Admin: isAdmin(c)},
-			"page_subtitle": "Información y versión",
+			"page_subtitle": locale.T(lang, "page.about_sub"),
 		})
 	}
 }
