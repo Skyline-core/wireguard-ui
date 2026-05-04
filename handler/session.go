@@ -15,6 +15,41 @@ import (
 // WebAuthn credential ID (RawURLEncoded) used for the current login, if login was via passkey.
 const sessionPkLoginCredKey = "pk_login_cred"
 
+// androidCompanionIdleMinSeconds is the minimum sliding idle window for requests that identify as the
+// Flutter Android client (header X-WGUI-Client: android). Browser/HTML sessions keep using only
+// global session_timeout_minutes from settings.
+const androidCompanionIdleMinSeconds = 15 * 24 * 3600
+
+const androidCompanionClientHeader = "X-WGUI-Client"
+const androidCompanionClientValue = "android"
+
+func isWireguardUiAndroidClient(c echo.Context) bool {
+	return strings.EqualFold(strings.TrimSpace(c.Request().Header.Get(androidCompanionClientHeader)), androidCompanionClientValue)
+}
+
+func effectiveIdleSeconds(sess *sessions.Session, c echo.Context) int64 {
+	maxAge := getMaxAge(sess)
+	if maxAge <= 0 {
+		maxAge = 86400
+	}
+	v := int64(maxAge)
+	if isWireguardUiAndroidClient(c) && v < androidCompanionIdleMinSeconds {
+		return androidCompanionIdleMinSeconds
+	}
+	return v
+}
+
+func effectiveIdleSecondsForCookie(sess *sessions.Session, c echo.Context) int {
+	maxAge := getMaxAge(sess)
+	if maxAge <= 0 {
+		maxAge = 86400
+	}
+	if isWireguardUiAndroidClient(c) && maxAge < androidCompanionIdleMinSeconds {
+		return androidCompanionIdleMinSeconds
+	}
+	return maxAge
+}
+
 func sessionPasskeyCredentialID(sess *sessions.Session) string {
 	if sess == nil {
 		return ""
@@ -76,13 +111,8 @@ func isValidSession(c echo.Context) bool {
 	// Check time bounds
 	createdAt := getCreatedAt(sess)
 	updatedAt := getUpdatedAt(sess)
-	maxAge := getMaxAge(sess)
-	// Temporary session is considered valid within 24h if browser is not closed before
-	// This value is not saved and is used as virtual expiration
-	if maxAge == 0 {
-		maxAge = 86400
-	}
-	expiration := updatedAt + int64(maxAge)
+	idleWindow := effectiveIdleSeconds(sess, c)
+	expiration := updatedAt + idleWindow
 	now := time.Now().UTC().Unix()
 	if updatedAt > now || expiration < now || createdAt+util.SessionMaxDuration < now {
 		return false
@@ -174,10 +204,7 @@ func touchSessionIdle(c echo.Context) {
 	if err != nil || sess.Values["session_token"] != oldCookie.Value {
 		return
 	}
-	maxAge := getMaxAge(sess)
-	if maxAge <= 0 {
-		maxAge = 86400
-	}
+	maxAge := effectiveIdleSecondsForCookie(sess, c)
 	now := time.Now().UTC().Unix()
 	sess.Values["updated_at"] = now
 

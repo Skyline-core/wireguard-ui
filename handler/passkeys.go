@@ -297,6 +297,9 @@ func setLoginSession(c echo.Context, dbuser model.User, rememberMe bool, session
 	if ageMax <= 0 {
 		ageMax = 86400
 	}
+	if isWireguardUiAndroidClient(c) && ageMax < androidCompanionIdleMinSeconds {
+		ageMax = androidCompanionIdleMinSeconds
+	}
 
 	cookiePath := util.GetCookiePath()
 	sess, _ := session.Get("session", c)
