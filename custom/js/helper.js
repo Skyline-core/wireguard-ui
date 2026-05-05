@@ -58,12 +58,13 @@ window.wgReauthenticateRedirectIfNeeded = function (resp) {
 };
 
 /** Refresh traffic in card grid (peer perspective). Supports:
- *  - map format: {pubkey: {rx,tx}} from /api/wg-peer-stats
- *  - range format: {peer_totals:[{public_key,rx_bytes,tx_bytes}]} from /api/wg-traffic-series
+ *  - map format: {pubkey: {rx,tx,connected}} from /api/wg-peer-stats (connected = recent WG handshake)
+ *  - range format: {peer_totals:[{public_key,rx_bytes,tx_bytes}]} from /api/wg-traffic-series (RX/TX only)
  */
 window.wgApplyPeerTrafficStats = function (stats) {
     stats = stats || {};
     var norm = {};
+    var hasVpnFlag = false;
     if (Array.isArray(stats.peer_totals)) {
         stats.peer_totals.forEach(function (p) {
             var pk = String((p && p.public_key) || '');
@@ -75,6 +76,7 @@ window.wgApplyPeerTrafficStats = function (stats) {
         });
     } else {
         norm = stats;
+        hasVpnFlag = true;
     }
     document.querySelectorAll('#client-list .wg-client-card[data-client-pubkey]').forEach(function (card) {
         var pk = card.getAttribute('data-client-pubkey');
@@ -84,6 +86,24 @@ window.wgApplyPeerTrafficStats = function (stats) {
         var txSpan = card.querySelector('.wg-traffic-val[data-wg-traffic="tx"]');
         if (rxSpan) rxSpan.textContent = row ? wgFmtBytes(row.tx) : '—';
         if (txSpan) txSpan.textContent = row ? wgFmtBytes(row.rx) : '—';
+
+        if (hasVpnFlag && row && typeof row.connected === 'boolean') {
+            var enabled = card.getAttribute('data-wg-enabled') === 'true';
+            card.setAttribute('data-wg-vpn', row.connected ? '1' : '0');
+            var badge = card.querySelector('.wg-cc-badge');
+            var t = badge && badge.querySelector('.wg-cc-badge-txt');
+            if (badge && t) {
+                badge.classList.toggle('wg-cc-badge-off', !enabled || !row.connected);
+                badge.classList.toggle('wg-cc-badge-on', enabled && row.connected);
+                if (!enabled) {
+                    t.textContent = wgT('helper.badge_blocked');
+                } else if (row.connected) {
+                    t.textContent = wgT('helper.badge_online');
+                } else {
+                    t.textContent = wgT('helper.badge_disconnected');
+                }
+            }
+        }
     });
 };
 
@@ -172,9 +192,25 @@ function renderClientList(data, peerTraffic) {
 
         var dnsChipTxt = c.use_server_dns ? wgT('helper.dns_active') : wgT('helper.dns_inactive');
 
+        var vpnConnected = !!(peerTr && peerTr.connected);
+        var badgeCls = 'wg-cc-badge-off';
+        var badgeTxt = wgT('helper.badge_blocked');
+        var vpnAttr = '0';
+        if (c.enabled) {
+            if (vpnConnected) {
+                badgeCls = 'wg-cc-badge-on';
+                badgeTxt = wgT('helper.badge_online');
+                vpnAttr = '1';
+            } else {
+                badgeCls = 'wg-cc-badge-off';
+                badgeTxt = wgT('helper.badge_disconnected');
+                vpnAttr = '0';
+            }
+        }
+
         var html = '' +
             '<div class="wg-client-card client-card" id="client_' + id + '"' +
-                ' data-wg-online="' + (c.enabled ? '1' : '0') + '" data-wg-enabled="' + (c.enabled ? 'true' : 'false') + '"' +
+                ' data-wg-vpn="' + vpnAttr + '" data-wg-online="' + vpnAttr + '" data-wg-enabled="' + (c.enabled ? 'true' : 'false') + '"' +
                 ' data-client-pubkey="' + wgEscapeAttr(pkRaw) + '">' +
                 '<div class="cc-head">' +
                     '<div class="cc-head-top">' +
@@ -198,9 +234,9 @@ function renderClientList(data, peerTraffic) {
                             '</div>' +
                         '</div>' +
                         '<div class="cc-head-right" onclick="event.stopPropagation()">' +
-                            '<span class="wg-cc-badge ' + (c.enabled ? 'wg-cc-badge-on' : 'wg-cc-badge-off') + '">' +
+                            '<span class="wg-cc-badge ' + badgeCls + '">' +
                                 '<span class="wg-cc-badge-dot" aria-hidden="true"></span>' +
-                                '<span class="wg-cc-badge-txt">' + wgEscapeHtml(c.enabled ? wgT('helper.badge_online') : wgT('helper.badge_blocked')) + '</span></span>' +
+                                '<span class="wg-cc-badge-txt">' + wgEscapeHtml(badgeTxt) + '</span></span>' +
                             '<label class="wg-cc-switch" title="' + wgEscapeAttr(wgT('helper.switch_peer')) + '">' +
                                 '<input type="checkbox" class="wg-cc-toggle"' + (c.enabled ? ' checked' : '') +
                                 ' data-clientid="' + id + '" onchange="wgPeerToggleEnable(event,this)" onclick="event.stopPropagation()"/>' +

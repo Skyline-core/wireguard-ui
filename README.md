@@ -137,7 +137,7 @@ When login is **not** disabled:
 | Method | Path                            | Notes                                                                                |
 | ------ | ------------------------------- | ------------------------------------------------------------------------------------ |
 | `GET`  | `{BASE}/api/dashboard-stats`    | KPIs for the dashboard.                                                              |
-| `GET`  | `{BASE}/api/wg-peer-stats`      | Per-peer counters for lists.                                                         |
+| `GET`  | `{BASE}/api/wg-peer-stats`      | Per-peer WireGuard counters (`rx`/`tx` from the kernel) plus `connected` (recent handshake, same rule as the dashboard). |
 | `GET`  | `{BASE}/api/wg-traffic-series`  | Cached series; query `range=24h` (default), `7d`, or `30d`.                          |
 | `GET`  | `{BASE}/api/machine-ips`        | Suggested endpoint IPs.                                                              |
 | `GET`  | `{BASE}/api/subnet-ranges`      | Ordered subnet ranges.                                                               |

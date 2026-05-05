@@ -291,9 +291,9 @@
                 dataType: 'json',
                 contentType: "application/json",
                 success: function (data) {
-                    $.getJSON('{{.basePath}}/api/wg-traffic-series?range=30d')
-                        .done(function (traffic) {
-                            renderClientList(data, traffic || {});
+                    $.getJSON('{{.basePath}}/api/wg-peer-stats')
+                        .done(function (stats) {
+                            renderClientList(data, stats || {});
                         })
                         .fail(function () {
                             renderClientList(data, {});
@@ -338,7 +338,6 @@
             var card = document.getElementById("client_" + clientID);
             if (card) {
                 card.setAttribute("data-wg-enabled", "true");
-                card.setAttribute("data-wg-online", "1");
             }
             wgSyncToggleFromCard(clientID)
         }
@@ -354,6 +353,7 @@
             var card = document.getElementById("client_" + clientID);
             if (card) {
                 card.setAttribute("data-wg-enabled", "false");
+                card.setAttribute("data-wg-vpn", "0");
                 card.setAttribute("data-wg-online", "0");
             }
             wgSyncToggleFromCard(clientID)
@@ -367,12 +367,8 @@
             card.querySelectorAll(".wg-cc-toggle").forEach(function (cb) {
                 cb.checked = en;
             });
-            card.querySelectorAll(".wg-cc-badge").forEach(function (badge) {
-                badge.classList.toggle("wg-cc-badge-off", !en);
-                badge.classList.toggle("wg-cc-badge-on", en);
-                var t = badge.querySelector(".wg-cc-badge-txt");
-                if (t) t.textContent = en ? "Online" : "Sin acceso";
-            });
+            if (typeof window.wgApplyPeerTrafficStats !== "function") return;
+            $.getJSON('{{.basePath}}/api/wg-peer-stats').done(window.wgApplyPeerTrafficStats);
         }
 
         /** Toggle in card header — uses existing resume/pause APIs */
@@ -470,7 +466,7 @@
             }
             wgTrafficPollTimer = setInterval(function () {
                 if (typeof window.wgApplyPeerTrafficStats !== 'function') return;
-                $.getJSON('{{.basePath}}/api/wg-traffic-series?range=30d').done(window.wgApplyPeerTrafficStats);
+                $.getJSON('{{.basePath}}/api/wg-peer-stats').done(window.wgApplyPeerTrafficStats);
             }, WG_TRAFFIC_POLL_MS);
         }
 

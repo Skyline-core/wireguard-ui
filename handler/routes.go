@@ -361,10 +361,12 @@ func GetCurrentUserPasskeys(db store.IStore) echo.HandlerFunc {
 		if err != nil {
 			return c.JSON(http.StatusNotFound, jsonHTTPResponse{false, "User not found"})
 		}
+		gs, _ := db.GetGlobalSettings()
 		return c.JSON(http.StatusOK, map[string]interface{}{
-			"status":   true,
-			"username": u.Username,
-			"passkeys": buildPasskeyList(u),
+			"status":            true,
+			"username":          u.Username,
+			"passkeys":          buildPasskeyList(u),
+			"passkeys_enabled":  gs.TOTPEnabled,
 		})
 	}
 }

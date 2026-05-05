@@ -142,9 +142,11 @@ func GatherWireGuardStatusDevices(db store.IStore, c echo.Context) ([]WGDeviceVM
 }
 
 // PeerTrafficRow RX/TX for one persisted public key (wgctrl counters keyed by pubkey string).
+// Connected matches dashboard logic: recent WireGuard handshake (see GatherWireGuardStatusDevices).
 type PeerTrafficRow struct {
-	Rx int64 `json:"rx"`
-	Tx int64 `json:"tx"`
+	Rx        int64 `json:"rx"`
+	Tx        int64 `json:"tx"`
+	Connected bool  `json:"connected"`
 }
 
 // DashboardStatsRow contains compact dynamic KPI values for dashboard polling.
@@ -193,6 +195,8 @@ func getCachedWgPeerStats(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, jsonHTTPResponse{false, err.Error()})
 	}
 
+	const handshakeRecent = 3 * time.Minute
+
 	out := make(map[string]PeerTrafficRow)
 	for _, dev := range devices {
 		for _, peer := range dev.Peers {
@@ -200,6 +204,10 @@ func getCachedWgPeerStats(c echo.Context) error {
 			e := out[pk]
 			e.Rx += peer.ReceiveBytes
 			e.Tx += peer.TransmitBytes
+			lh := peer.LastHandshakeTime
+			rel := time.Since(lh)
+			conn := !lh.IsZero() && rel < handshakeRecent
+			e.Connected = e.Connected || conn
 			out[pk] = e
 		}
 	}

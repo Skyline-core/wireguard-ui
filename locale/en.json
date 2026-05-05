@@ -121,6 +121,7 @@
   "helper.created_chip_title": "Created",
   "helper.updated_chip_title": "Last modified",
   "helper.badge_online": "Online",
+  "helper.badge_disconnected": "Disconnected",
   "helper.badge_blocked": "No access",
   "helper.switch_peer": "Enable / disable peer",
   "helper.field_allocated": "Allocated IP",
