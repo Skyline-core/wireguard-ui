@@ -797,6 +797,16 @@ running the container with `restart: unless-stopped`. These settings can also pi
 Path, after restarting the container. Please make sure you have `--cap-add=NET_ADMIN` in your container config to make
 this feature work.
 
+## Continuous integration (GitHub Actions)
+
+Workflow **`.github/workflows/lint.yml`** (on **`master`**) runs:
+
+- **`go vet ./...`** and **`go test ./... -short`**
+- **`govulncheck`** via **`go run golang.org/x/vuln/cmd/govulncheck@latest ./...`**
+- **golangci-lint** (see **`.golangci.yml`**)
+
+Go is installed from **`go.mod`** (**`setup-go`** with **`go-version-file`**).
+
 ## Build
 
 ### Build docker image

@@ -31,7 +31,7 @@ var (
 	appVersion = "development"
 	gitCommit  = "N/A"
 	gitRef     = "N/A"
-	buildTime  = fmt.Sprintf(time.Now().UTC().Format("01-02-2006 15:04:05"))
+	buildTime  = time.Now().UTC().Format("01-02-2006 15:04:05")
 	// configuration variables
 	flagDisableLogin             = false
 	flagBindAddress              = "0.0.0.0:5000"
