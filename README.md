@@ -2,6 +2,16 @@
 
 A web user interface to manage your WireGuard setup (peers, server config, QR/download, email/Telegram delivery, and optional Android push).
 
+<img width="1465" height="830" alt="586670714-378f20c6-95b8-4a50-9d6d-e54840dbee0f" src="https://github.com/user-attachments/assets/794f8fae-3487-40f7-94a1-a8b7e6863512" />
+
+<img width="1470" height="827" alt="586669648-09e0d427-bf12-4ca9-a737-aac957ee0ffb" src="https://github.com/user-attachments/assets/7036a022-f8d3-42de-958c-67e61d8ef7c0" />
+
+<img width="1460" height="810" alt="586669676-b8ba9f0a-9c50-4e81-9d6d-6a7451b4264a" src="https://github.com/user-attachments/assets/8a8d06c8-36da-4d10-bb07-2bb71e7c193a" />
+
+<img width="1457" height="819" alt="586669663-2b29cc56-36f5-46fe-a703-bae38f8e252f" src="https://github.com/user-attachments/assets/720c81f0-64ac-43dc-9107-024ca85f2a65" />
+
+<img width="1468" height="821" alt="586669659-60d37783-6ea2-4198-aac5-b6efb1e5f332" src="https://github.com/user-attachments/assets/5bcc9ca8-fe6b-44b4-b35c-00dae72f0d4b" />
+
 ## Contents
 
 ### Getting started
