@@ -55,8 +55,10 @@ sudo ./setup-linux-production.sh
 
 The script can:
 
+- Install the **`wireguard-ui` binary** to `/usr/local/bin/wireguard-ui` (compile from source, copy a bundled `wireguard-ui-linux-*` artifact, or copy your own build)
+- Register and enable a **systemd** unit (`wireguard-ui.service`) for automatic start on boot
 - Create paths under `/etc/wireguard-ui` and `/var/lib/wireguard-ui`
-- Generate `SESSION_SECRET_FILE` and a starter `wireguard-ui` **systemd** unit
+- Generate `SESSION_SECRET_FILE` and environment file
 - Optionally copy a **Firebase service-account JSON** and set `FCM_CREDENTIALS_FILE`
 - Optionally store **Android passkey** SHA-256 fingerprints and WebAuthn env vars
 - Optionally install **Caddy** (Debian/Ubuntu) and append an `import` to `/etc/caddy/Caddyfile`

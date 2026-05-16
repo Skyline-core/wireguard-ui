@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Guided production setup on Linux for WireGuard UI: optional complementary packages
-# (openssl, curl, wireguard-tools, etc.; Caddy on Debian/Ubuntu), binary install, systemd,
-# optional HTTPS + Caddy site, secret files (session, Android passkey SHA), optional FCM JSON.
+# Guided production setup on Linux for WireGuard UI: installs the binary to
+# /usr/local/bin/wireguard-ui (compile, repo artifact, or copy), registers a systemd
+# unit for boot-time start, optional packages (openssl, wireguard-tools, Caddy), and
+# secret/env files (session, Android passkey SHA, optional FCM JSON).
 # Run as root or with sudo. Does not overwrite existing files without prompting.
 #
 # Usage: sudo ./setup-linux-production.sh
@@ -99,6 +100,80 @@ normalize_base_path() {
   else
     printf '/%s' "$p"
   fi
+}
+
+# First existing candidate binary in the repo tree (release artifact or local build).
+find_repo_binary() {
+  local root="$1"
+  local c
+  for c in \
+    "$root/wireguard-ui-linux-arm64" \
+    "$root/wireguard-ui-linux-amd64" \
+    "$root/wireguard-ui" \
+    "$root/dist/wireguard-ui"; do
+    if [[ -f "$c" ]]; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Install wireguard-ui executable to BIN_DST (compile, copy from repo, or copy custom path).
+install_wireguard_binary() {
+  local bin_dst="$1"
+  local repo_root="$2"
+  local installed=0
+  local src prebuilt
+
+  info "--- Instalación del binario → $bin_dst ---"
+
+  if [[ -f "$bin_dst" ]]; then
+    if ! yes_no "Ya existe $bin_dst. ¿Reemplazarlo?" "n"; then
+      info "Se conserva el binario en $bin_dst."
+      return 0
+    fi
+  fi
+
+  install -d -m 0755 "$(dirname "$bin_dst")"
+
+  if [[ -f "$repo_root/go.mod" ]]; then
+    prebuilt="$(find_repo_binary "$repo_root" || true)"
+    if [[ -n "$prebuilt" ]]; then
+      if yes_no "¿Copiar el binario del repo ($prebuilt) a $bin_dst?" "y"; then
+        install -Dm755 "$prebuilt" "$bin_dst"
+        info "Binario instalado: $prebuilt → $bin_dst"
+        installed=1
+      fi
+    fi
+  fi
+
+  if [[ "$installed" -eq 0 ]] && [[ -f "$repo_root/go.mod" ]]; then
+    if yes_no "¿Compilar desde el código de este repo e instalar en $bin_dst?" "y"; then
+      if yes_no "¿Ejecutar prepare_assets.sh antes del build?" "y"; then
+        chmod +x "$repo_root/prepare_assets.sh" 2>/dev/null || true
+        (cd "$repo_root" && bash ./prepare_assets.sh)
+      fi
+      if ! command -v go >/dev/null 2>&1; then
+        die "Falta 'go' en el PATH para compilar."
+      fi
+      (cd "$repo_root" && go build -trimpath -o "$bin_dst" .)
+      info "Binario compilado e instalado en $bin_dst"
+      installed=1
+    fi
+  fi
+
+  if [[ "$installed" -eq 0 ]]; then
+    src="$(prompt "Ruta al ejecutable wireguard-ui a copiar (obligatorio si no compilaste)" "")"
+    [[ -n "$src" ]] || die "Indicá un binario fuente o compilá desde el repo."
+    [[ -f "$src" ]] || die "No existe el archivo: $src"
+    install -Dm755 "$src" "$bin_dst"
+    info "Binario instalado: $src → $bin_dst"
+    installed=1
+  fi
+
+  [[ -f "$bin_dst" ]] || die "No se pudo instalar el binario en $bin_dst"
+  chmod 755 "$bin_dst"
 }
 
 # Detect pkg manager binary on PATH (not full distro ID).
@@ -206,7 +281,10 @@ echo
 
 WG_HOME="$(prompt 'Directorio de secretos y archivos generados (env, Caddy, etc.)' '/etc/wireguard-ui')"
 DATA_DIR="$(prompt 'Directorio de datos (base de datos ./db del programa = WorkingDirectory systemd)' '/var/lib/wireguard-ui')"
-BIN_DST="$(prompt 'Ruta del binario instalado (se copia o compilá vos)' '/usr/local/bin/wireguard-ui')"
+BIN_DST='/usr/local/bin/wireguard-ui'
+if ! yes_no "¿Instalar el binario en $BIN_DST? (recomendado)" "y"; then
+  BIN_DST="$(prompt 'Ruta alternativa del binario' '/usr/local/bin/wireguard-ui')"
+fi
 APP_USER="$(prompt 'Usuario del servicio systemd (root suele hacer falta si usás wg-quick desde la UI)' 'root')"
 APP_GROUP="$APP_USER"
 
@@ -223,29 +301,12 @@ fi
 ensure_dir "$WG_HOME" 0750 "$APP_USER" "$APP_GROUP"
 ensure_dir "$DATA_DIR" 0750 "$APP_USER" "$APP_GROUP"
 
-if yes_no "¿Compilar WireGuard UI desde ESTE repo (PWD actual) y guardar binario ahí?" "n"; then
-  REPO_ROOT="$(pwd)"
-  if [[ ! -f "$REPO_ROOT/go.mod" ]]; then
-    die "No encuentro go.mod en $(pwd); ejecutá el script desde la raíz del repo."
-  fi
-    if yes_no "¿Ejecutar prepare_assets.sh antes del build?" "y"; then
-      chmod +x "$REPO_ROOT/prepare_assets.sh" 2>/dev/null || true
-      (cd "$REPO_ROOT" && bash ./prepare_assets.sh)
-  fi
-  if ! command -v go >/dev/null 2>&1; then
-    die "Falta 'go' en el PATH para compilar."
-  fi
-  (cd "$REPO_ROOT" && go build -o "$BIN_DST" -trimpath .)
-  info "Binario compilado en $BIN_DST"
-else
-  SRC_BIN="$(prompt "Ruta al binario ya existente (vacío si ya está en BIN_DST, dejar en blanco)" "")"
-  if [[ -n "$SRC_BIN" ]]; then
-    install -Dm755 "$SRC_BIN" "$BIN_DST"
-    info "Binario instalado desde $SRC_BIN → $BIN_DST"
-  fi
+REPO_ROOT="$(pwd)"
+if [[ ! -f "$REPO_ROOT/go.mod" ]]; then
+  warn "No hay go.mod en $REPO_ROOT; solo podrás copiar un binario ya compilado."
+  REPO_ROOT=""
 fi
-
-[[ -f "$BIN_DST" ]] || die "El binario no existe: $BIN_DST"
+install_wireguard_binary "$BIN_DST" "$REPO_ROOT"
 
 BIND_LOOPBACK="$(prompt 'Bind local del proceso (ej. 127.0.0.1 si lo tapa Caddy, 0.0.0.0 si es directo)' '127.0.0.1:5000')"
 if ! yes_no "¿Es correcto BIND_ADDRESS='$BIND_LOOPBACK'?" "y"; then
@@ -359,6 +420,7 @@ install -Dm600 -o "$APP_USER" -g "$APP_GROUP" "$ENV_FILE.tmp" "$ENV_FILE"
 rm -f "$ENV_FILE.tmp"
 info "Variables de entorno: $ENV_FILE"
 
+info "--- Servicio systemd (arranque automático) ---"
 UNIT_PATH="/etc/systemd/system/wireguard-ui.service"
 cat >"$UNIT_PATH.tmp" <<UNIT
 [Unit]
@@ -387,11 +449,12 @@ rm -f "$UNIT_PATH.tmp"
 info "Unidad systemd: $UNIT_PATH"
 
 systemctl daemon-reload
-if yes_no "¿Habilitar e iniciar wireguard-ui ahora?" "y"; then
+if yes_no "¿Habilitar wireguard-ui al arranque del sistema e iniciarlo ahora? (systemctl enable --now)" "y"; then
   systemctl enable --now wireguard-ui.service
   systemctl --no-pager -l status wireguard-ui.service || true
+  info "Servicio habilitado: arranca solo tras reinicios (WantedBy=multi-user.target)."
 else
-  warn "Activá manualmente: systemctl enable --now wireguard-ui"
+  warn "Para arranque automático más tarde: systemctl enable --now wireguard-ui"
 fi
 
 # --- Caddy opcional --------------------------------------------------------
