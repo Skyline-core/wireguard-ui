@@ -1,17 +1,36 @@
 # wireguard-ui
 
+A web user interface to manage your WireGuard setup (peers, server config, QR/download, email/Telegram delivery, and optional Android push).
+
 ## Contents
 
-Quick links to the main documentation sections:
+### Getting started
 
-- [WireGuard UI v2](#wireguard-ui-v2) — what changed in this fork and how to switch language
-- [Features](#features) — classic and v2 capabilities
-- [HTTP API reference](#http-api-reference) — JSON routes, auth, and mobile-related endpoints
-- [Run WireGuard-UI](#run-wireguard-ui) — binary and Docker Compose
-- [Environment variables](#environment-variables) — configuration reference
-- [Firebase Cloud Messaging (FCM)](#firebase-cloud-messaging-fcm) — push setup and registration API
+- [WireGuard UI v2](#wireguard-ui-v2) — what changed in this fork; language and build notes
+- [Quick install (scripted setup)](#quick-install-scripted-setup) — interactive Linux install with `setup-linux-production.sh`
+- [Run WireGuard UI](#run-wireguard-ui) — binary, Docker Compose, default credentials
+
+### Using the panel
+
+- [Features](#features) — dashboard, traffic, logs, users, Passkeys overview
+- [HTTP API reference](#http-api-reference) — JSON routes for integrations and the Android app
+
+### Configuration
+
+- [Environment variables](#environment-variables) — full reference table
+- [Firebase Cloud Messaging (FCM)](#firebase-cloud-messaging-fcm) — push notifications for Android
 - [Session idle timeout](#session-idle-timeout-settings--session--security) — minutes-based idle logout
-- [Auto restart WireGuard daemon](#auto-restart-wireguard-daemon) — systemd / OpenRC / Docker
+- [Passkeys (WebAuthn)](#passkeys-webauthn) — passwordless login, Android Credential Manager, reverse proxy
+- [Server UI (optional OS integration)](#server-ui-optional-os-integration) — `wg-quick`, sysctl, log tail
+
+### Deployment on Linux
+
+- [systemd: install and enable the web service](#systemd-install-and-enable-the-web-service) — unit file, data directory, environment files
+- [Auto restart WireGuard daemon](#auto-restart-wireguard-daemon) — optional `wg-quick` reload when `wg.conf` changes
+
+### Development
+
+- [Continuous integration (GitHub Actions)](#continuous-integration-github-actions)
 - [Build](#build) — assets, Docker image, binary
 - [License](#license)
 
@@ -21,12 +40,30 @@ This repository ships **version 2** of the WireGuard UI: an updated shell-style 
 
 **Notes**
 
-- **Building from source**: run `./prepare_assets.sh` before `go build` when templates or static assets change (see **Build** below).
+- **Building from source**: run `./prepare_assets.sh` before `go build` when templates or static assets change (see [Build](#build)).
 - **Changing UI language**: set **Language** under **Global settings**, save, click **Apply config** in the toolbar, then **reload the page** so server-rendered templates and client-side `WG_T` strings refresh.
 
----
+## Quick install (scripted setup)
 
-A web user interface to manage your WireGuard setup.
+For a **first install on systemd-based Linux** (Debian, Ubuntu, RHEL-family, etc.), use the interactive script at the repository root:
+
+```bash
+cd /path/to/wireguard-ui
+chmod +x setup-linux-production.sh
+sudo ./setup-linux-production.sh
+```
+
+The script can:
+
+- Create paths under `/etc/wireguard-ui` and `/var/lib/wireguard-ui`
+- Generate `SESSION_SECRET_FILE` and a starter `wireguard-ui` **systemd** unit
+- Optionally copy a **Firebase service-account JSON** and set `FCM_CREDENTIALS_FILE`
+- Optionally store **Android passkey** SHA-256 fingerprints and WebAuthn env vars
+- Optionally install **Caddy** (Debian/Ubuntu) and append an `import` to `/etc/caddy/Caddyfile`
+
+Review the prompts before exposing the panel on the internet. You will still need HTTPS for Passkeys in production—see [Passkeys (WebAuthn)](#passkeys-webauthn) and [systemd: install and enable the web service](#systemd-install-and-enable-the-web-service) for manual steps, reverse-proxy examples, and permission details the script does not fully automate.
+
+---
 
 ## Features
 
@@ -49,12 +86,10 @@ A web user interface to manage your WireGuard setup.
 - **Internationalization**: strings in `locale/en.json` and `locale/es.json`; templates use `tr` / client bundle `WG_T` + `wgT()` for JS toasts and dynamic UI.
 - **Multi-user auth**: **Users** admin page—create/edit/delete users, admin role, suspend account, revoke all sessions, inline Passkey add/remove/rename per user.
 - **My account / Profile**: self-service display name, email, password change, own Passkeys.
-- **Passkeys (WebAuthn)**: passwordless sign-in and registration flows; env knobs for RP ID / origins behind reverse proxies (`WGUI_WEBAUTHN_`*). Optional `**WGUI_ANDROID_PASSKEY_`*** + reverse-proxy wiring for `**/.well-known/assetlinks.json`** unlock the Flutter Android client's Credential Manager flows.
+- **Passkeys (WebAuthn)**: passwordless sign-in and registration; see [Passkeys (WebAuthn)](#passkeys-webauthn) for server env vars, Android Credential Manager, and reverse-proxy setup.
 - **Server page extras** (Linux, when allowed): optional **IPv4 forwarding** via `sysctl`, **persist** / **auto-apply** preferences, `**wg-quick` down/up/restart** and `**wg syncconf`** after apply, optional **systemd**-based restarts.
 - **Wake-on-LAN**: manage hosts and send magic packets from the UI.
-- **Client list UX**: card layout with inline enable toggle, traffic chips fed by `**/api/wg-peer-stats`**, and "Apply config" integration after edits.
-
-WireGuard UI v2
+- **Client list UX**: card layout with inline enable toggle, traffic chips fed by `/api/wg-peer-stats`, and "Apply config" integration after edits.
 
 ## HTTP API reference
 
@@ -89,6 +124,7 @@ When login is **not** disabled:
 
 ### Passkeys (authenticated)
 
+Browser and Android clients use these routes. Server setup: [Passkeys (WebAuthn)](#passkeys-webauthn).
 
 | Method | Path                                            | Notes                              |
 | ------ | ----------------------------------------------- | ---------------------------------- |
@@ -206,9 +242,11 @@ These return HTML for the v2 shell, not JSON: `{BASE}/` (clients), `{BASE}/dashb
 
 ---
 
-## Run WireGuard-UI
+## Run WireGuard UI
 
-> ⚠️The default username and password are `admin`. Please change it to secure your setup.
+> **Default credentials:** username and password are both `admin`. Change them after the first login.
+
+For a guided Linux install (systemd unit, secrets paths, optional Caddy), start with [Quick install (scripted setup)](#quick-install-scripted-setup).
 
 ### Using binary file
 
@@ -229,8 +267,9 @@ Choose the example which fits you the most, adjust the configuration for your ne
 docker-compose up
 ```
 
-## Environment Variables
+## Environment variables
 
+Process environment and `EnvironmentFile=` entries for systemd/Docker. Grouped topics below: [FCM](#firebase-cloud-messaging-fcm), [session idle timeout](#session-idle-timeout-settings--session--security), [Passkeys](#passkeys-webauthn), [Server UI / WireGuard integration](#server-ui-optional-os-integration).
 
 | Variable                         | Description                                                                                                                                                                                                                                                                                           | Default                            |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
@@ -446,7 +485,15 @@ sudo tail -n 50 /var/log/wireguard-ui.log
 
 > Note: The Logs page now also includes `systemctl status wg-quick@<iface>` and recent `journalctl` output. `WGUI_LOG_TAIL_PATH` is only for the optional file section.
 
-#### Passkeys (WebAuthn) behind reverse proxy (systemd example)
+> **Passkeys:** `WGUI_WEBAUTHN_*` and `WGUI_ANDROID_PASSKEY_*` are listed in the [Server UI](#server-ui-optional-os-integration) table above. Full setup (browser and Android app, reverse proxy, HTTPS) is in [Passkeys (WebAuthn)](#passkeys-webauthn).
+
+## Passkeys (WebAuthn)
+
+Passwordless login for the web UI and the [wireguard-ui-android-client](https://github.com/Skyline-core/wireguard-ui-android-client) app. Enable **Passkeys** under **Global settings**, **Apply config**, then enroll credentials under **Profile** or **Users**.
+
+Related environment variables: `WGUI_WEBAUTHN_RP_ID`, `WGUI_WEBAUTHN_RP_ORIGINS`, `WGUI_WEBAUTHN_RP_DISPLAY_NAME`, `WGUI_ANDROID_PASSKEY_SHA256`, `WGUI_ANDROID_PASSKEY_PACKAGE` (see [Server UI (optional OS integration)](#server-ui-optional-os-integration)).
+
+### WebAuthn behind reverse proxy (systemd example)
 
 If you use a public domain and/or reverse proxy (Nginx, Caddy, Traefik, Cloudflare Tunnel), define a fixed WebAuthn RP ID and allowed origins. Add the following under `**[Service]**` (for example with `**systemctl edit wireguard-ui**` or entries in the same `**EnvironmentFile=**` you use in **[systemd: install and enable the web service](#systemd-install-and-enable-the-web-service)**):
 
@@ -470,7 +517,7 @@ Notes:
 - `WGUI_WEBAUTHN_RP_ORIGINS` accepts comma-separated values for multi-origin setups.
 - Passkeys require `https://` in production (browsers only allow non-HTTPS for localhost).
 
-##### Android app passkeys (companion Flutter client — Credential Manager)
+### Android app passkeys (companion Flutter client — Credential Manager)
 
 The Flutter Android companion app calls the same WireGuard UI WebAuthn JSON endpoints (`**POST**` `**{BASE_PATH}/api/passkeys/login/begin**`, `**/finish**`). Android **Credential Manager** still verifies **Digital Asset Links** independently: it downloads `**https://<rpId>/.well-known/assetlinks.json`** and checks package name + signing certificate fingerprints against your app install.
 
@@ -572,7 +619,7 @@ Companion UX reminders:
 
 Additional documentation lives in `**wireguard-ui-android-client`** `README.md` (mobile-focused recap).
 
-##### Caddy + Dynamic DNS (No-IP): quick HTTPS so Passkeys work
+### Caddy + Dynamic DNS (No-IP): quick HTTPS so Passkeys work
 
 Browsers treat Passkeys/WebAuthn as **[secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)** (`https://` on a hostname, or `http://localhost`). Plain `http://<your-ip>` is **not** enough. Use a hostname (No-IP, DuckDNS, etc.), forward ports **80** and **443**, and terminate TLS with Caddy.
 
@@ -611,7 +658,7 @@ If HTTPS still fails behind NAT, verify port 80 reaches Caddy on first certifica
 WireGuard-UI only takes care of configuration generation. On Linux you can enable in-process `wg syncconf` after apply (see variables above), or use systemd to watch for changes and restart the
 service. Following is an example:
 
-> **Note:** The **systemd** block below does **not** start the `wireguard-ui` web process. It only runs `systemctl restart wg-quick@wg0` when `wg0.conf` is modified on disk. The UI binary is a separate program (see **Run WireGuard-UI** above and **[systemd: install and enable the web service](#systemd-install-and-enable-the-web-service)**).
+> **Note:** The **systemd** block below does **not** start the `wireguard-ui` web process. It only runs `systemctl restart wg-quick@wg0` when `wg0.conf` is modified on disk. The UI binary is a separate program (see [Run WireGuard UI](#run-wireguard-ui) and [systemd: install and enable the web service](#systemd-install-and-enable-the-web-service)).
 
 ### systemd: install and enable the web service
 
@@ -621,19 +668,9 @@ This section is about the **wireguard-ui HTTP process** (the web UI), not the op
 
 1. **Working directory** — The app opens its JSON store at `**./db`** relative to the current working directory (`jsondb.New("./db")` in `main.go`). The unit **must** set `WorkingDirectory` to a persistent directory owned by the service user (e.g. `/var/lib/wireguard-ui`). If you omit this, the database lands wherever systemd’s default cwd is (often `/` or `/root`), which is easy to misplace or permission incorrectly.
 2. **Binary** — Install the release binary (or your own build after `./prepare_assets.sh`) to a fixed path, e.g. `**/usr/local/bin/wireguard-ui`**, mode `0755`.
-3. **Environment** — All knobs (`BASE_PATH`, `BIND_ADDRESS`, `SESSION_SECRET`, `WGUI_`*, `FCM_CREDENTIALS_FILE`, etc.) are ordinary **process environment variables**. Set them with `Environment=` lines in the unit, or load a file with `**EnvironmentFile=`**.
+3. **Environment** — All knobs (`BASE_PATH`, `BIND_ADDRESS`, `SESSION_SECRET`, `WGUI_*`, `FCM_CREDENTIALS_FILE`, etc.) are ordinary **process environment variables**. Set them with `Environment=` lines in the unit, or load a file with `EnvironmentFile=`.
 
-#### Scripted setup (`setup-linux-production.sh`)
-
-The repository root ships **`setup-linux-production.sh`** for an **interactive** install on systemd-based Linux hosts: creates paths under **`/etc/wireguard-ui`**, **`SESSION_SECRET_FILE`**, optional **Firebase service-account JSON** copy, optional **Android passkey SHA256** secret file and WebAuthn env vars, writes **`wireguard-ui.service`**, optionally installs **Caddy** (Debian/Ubuntu) and appends an `import` to **`/etc/caddy/Caddyfile`**.
-
-```bash
-cd /path/to/wireguard-ui
-chmod +x setup-linux-production.sh
-sudo ./setup-linux-production.sh
-```
-
-Review the prompts and the README sections on **`/.well-known/assetlinks.json`**, **`WGUI_ANDROID_PASSKEY_*`**, and **`FCM_CREDENTIALS_FILE`** before exposing the panel publicly.
+For an interactive first-time install (paths, secrets, optional Caddy), use [Quick install (scripted setup)](#quick-install-scripted-setup) instead of copying the unit by hand.
 
 #### Register the service (step by step)
 
