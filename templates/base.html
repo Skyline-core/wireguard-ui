@@ -695,7 +695,11 @@
             success: function(resp) {
                 $("#modal_new_client").modal('hide');
                 toastr.success(wgT('js.client_created_success'));
-                if (window.location.pathname === "{{.basePath}}/") {
+                if (typeof populateClientList === 'function') {
+                    // Clients page defines populateClientList() and needs full list refresh.
+                    populateClientList();
+                } else if (window.location.pathname === "{{.basePath}}/" && typeof populateClient === 'function') {
+                    // Fallback for pages that only render/update one card.
                     populateClient(resp.id);
                 }
                 updateApplyConfigVisibility()

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/ngoduykhanh/wireguard-ui/model"
+	"github.com/ngoduykhanh/wireguard-ui/store"
 	"golang.zx2c4.com/wireguard/wgctrl"
 )
 
@@ -20,6 +22,11 @@ const (
 
 // trafficSampleInterval: balance RPi CPU vs responsive rates (wgctrl each tick).
 const trafficSampleInterval = 4 * time.Second
+
+// trafficPersistInterval: how often to flush the in-memory traffic ring to db/server/traffic_cache.json.
+const trafficPersistInterval = 2 * time.Minute
+
+const trafficCacheSnapshotVersion = 1
 
 // recentRateWindowSamples * trafficSampleInterval ≈ 60s rolling window for KPI "gray" line (max inst. in window).
 const recentRateWindowSamples = 15
@@ -94,39 +101,62 @@ type trafficCache struct {
 }
 
 var (
-	trafficCacheOnce sync.Once
-	trafficCacheInst *trafficCache
+	trafficCacheOnce   sync.Once
+	trafficCacheInst   *trafficCache
+	trafficCacheStore  store.IStore // optional; set by RegisterTrafficCachePersistence before cache init
 )
+
+// RegisterTrafficCachePersistence enables saving traffic history under the jsondb data directory.
+// Call once from main before StartTrafficSeriesCache().
+func RegisterTrafficCachePersistence(db store.IStore) {
+	trafficCacheStore = db
+}
 
 func initTrafficCache() {
 	trafficCacheInst = &trafficCache{
 		baseBucketMs:    int64((30 * time.Minute).Milliseconds()),
-		maxBaseBuckets: 1440, // 30d @ 30min
-		baseBucketID:   make([]int64, 1440),
-		rxSumBps:       make([]float64, 1440),
-		rxCount:        make([]int, 1440),
-		txSumBps:       make([]float64, 1440),
-		txCount:        make([]int, 1440),
-		txMaxBps:       make([]float64, 1440),
-		topPeerBps:     make([]float64, 1440),
-		topPeerKey:     make([]string, 1440),
-		peerRxBytes:    make([]map[string]int64, 1440),
-		peerTxBytes:    make([]map[string]int64, 1440),
-		prevPeer:       make(map[string]PeerTrafficRow),
+		maxBaseBuckets:  1440, // 30d @ 30min
+		baseBucketID:    make([]int64, 1440),
+		rxSumBps:        make([]float64, 1440),
+		rxCount:         make([]int, 1440),
+		txSumBps:        make([]float64, 1440),
+		txCount:         make([]int, 1440),
+		txMaxBps:        make([]float64, 1440),
+		topPeerBps:      make([]float64, 1440),
+		topPeerKey:      make([]string, 1440),
+		peerRxBytes:     make([]map[string]int64, 1440),
+		peerTxBytes:     make([]map[string]int64, 1440),
+		prevPeer:        make(map[string]PeerTrafficRow),
+	}
+
+	if trafficCacheStore != nil {
+		if snap, err := trafficCacheStore.LoadTrafficCacheSnapshot(); err == nil && snap != nil {
+			trafficCacheInst.applySnapshot(snap)
+		}
 	}
 
 	// Run background refresh at a fixed cadence.
-		go func() {
-			ticker := time.NewTicker(trafficSampleInterval)
-			defer ticker.Stop()
-			// Best effort warmup: 2 samples to build deltas.
-			_ = trafficCacheInst.refreshOnce()
-			time.Sleep(900 * time.Millisecond)
+	go func() {
+		ticker := time.NewTicker(trafficSampleInterval)
+		defer ticker.Stop()
+		// Best effort warmup: 2 samples to build deltas.
+		_ = trafficCacheInst.refreshOnce()
+		time.Sleep(900 * time.Millisecond)
 		_ = trafficCacheInst.refreshOnce()
 		for range ticker.C {
 			_ = trafficCacheInst.refreshOnce()
 		}
 	}()
+
+	if trafficCacheStore != nil {
+		go func() {
+			t := time.NewTicker(trafficPersistInterval)
+			defer t.Stop()
+			for range t.C {
+				_ = persistTrafficSnapshot()
+			}
+		}()
+	}
 }
 
 func ensureTrafficCache() {
@@ -168,6 +198,133 @@ func maxFloatSlice(s []float64) float64 {
 		}
 	}
 	return m
+}
+
+func cloneInt64Map(m map[string]int64) map[string]int64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// applySnapshot restores bucket history from disk. Live prev* delta state is cleared so the
+// next kernel samples do not mix stale timestamps across process boundaries.
+func (c *trafficCache) applySnapshot(s *model.TrafficCacheSnapshot) {
+	if s == nil {
+		return
+	}
+	if s.Version != trafficCacheSnapshotVersion {
+		return
+	}
+	if s.MaxBaseBuckets != c.maxBaseBuckets || s.BaseBucketMs != c.baseBucketMs {
+		return
+	}
+	n := c.maxBaseBuckets
+	if len(s.BaseBucketID) != n || len(s.RxSumBps) != n || len(s.RxCount) != n ||
+		len(s.TxSumBps) != n || len(s.TxCount) != n || len(s.TxMaxBps) != n ||
+		len(s.TopPeerBps) != n || len(s.TopPeerKey) != n {
+		return
+	}
+
+	copy(c.baseBucketID, s.BaseBucketID)
+	copy(c.rxSumBps, s.RxSumBps)
+	copy(c.rxCount, s.RxCount)
+	copy(c.txSumBps, s.TxSumBps)
+	copy(c.txCount, s.TxCount)
+	copy(c.txMaxBps, s.TxMaxBps)
+	copy(c.topPeerBps, s.TopPeerBps)
+	copy(c.topPeerKey, s.TopPeerKey)
+
+	for i := 0; i < n; i++ {
+		var mrx, mtx map[string]int64
+		if i < len(s.PeerRxBytes) && s.PeerRxBytes[i] != nil {
+			mrx = cloneInt64Map(s.PeerRxBytes[i])
+		}
+		if i < len(s.PeerTxBytes) && s.PeerTxBytes[i] != nil {
+			mtx = cloneInt64Map(s.PeerTxBytes[i])
+		}
+		c.peerRxBytes[i] = mrx
+		c.peerTxBytes[i] = mtx
+	}
+
+	c.lastRxRate = s.LastRxRate
+	c.lastTxRate = s.LastTxRate
+	c.recentRx = append([]float64(nil), s.RecentRx...)
+	c.recentTx = append([]float64(nil), s.RecentTx...)
+	if len(c.recentRx) > recentRateWindowSamples {
+		c.recentRx = c.recentRx[len(c.recentRx)-recentRateWindowSamples:]
+	}
+	if len(c.recentTx) > recentRateWindowSamples {
+		c.recentTx = c.recentTx[len(c.recentTx)-recentRateWindowSamples:]
+	}
+
+	c.totalRxBytes = s.TotalRxBytes
+	c.totalTxBytes = s.TotalTxBytes
+	c.lastUpdateAtMs = s.LastUpdateAtMs
+	c.hasDeltaSample = s.HasDeltaSample
+
+	// Do not carry prev samples across restarts (stale dt / kernel counter resets).
+	c.prevAtMs = 0
+	c.prevRx = 0
+	c.prevTx = 0
+	c.prevPeer = make(map[string]PeerTrafficRow)
+}
+
+// trafficCacheToSnapshotLocked copies the current ring under c.mu.
+func trafficCacheToSnapshotLocked(c *trafficCache) *model.TrafficCacheSnapshot {
+	n := c.maxBaseBuckets
+	s := &model.TrafficCacheSnapshot{
+		Version:        trafficCacheSnapshotVersion,
+		BaseBucketMs:   c.baseBucketMs,
+		MaxBaseBuckets: c.maxBaseBuckets,
+		BaseBucketID:   append([]int64(nil), c.baseBucketID...),
+		RxSumBps:       append([]float64(nil), c.rxSumBps...),
+		RxCount:        append([]int(nil), c.rxCount...),
+		TxSumBps:       append([]float64(nil), c.txSumBps...),
+		TxCount:        append([]int(nil), c.txCount...),
+		TxMaxBps:       append([]float64(nil), c.txMaxBps...),
+		TopPeerBps:     append([]float64(nil), c.topPeerBps...),
+		TopPeerKey:     append([]string(nil), c.topPeerKey...),
+		LastRxRate:     c.lastRxRate,
+		LastTxRate:     c.lastTxRate,
+		RecentRx:       append([]float64(nil), c.recentRx...),
+		RecentTx:       append([]float64(nil), c.recentTx...),
+		TotalRxBytes:   c.totalRxBytes,
+		TotalTxBytes:   c.totalTxBytes,
+		LastUpdateAtMs: c.lastUpdateAtMs,
+		HasDeltaSample: c.hasDeltaSample,
+	}
+	s.PeerRxBytes = make([]map[string]int64, n)
+	s.PeerTxBytes = make([]map[string]int64, n)
+	for i := 0; i < n; i++ {
+		s.PeerRxBytes[i] = cloneInt64Map(c.peerRxBytes[i])
+		s.PeerTxBytes[i] = cloneInt64Map(c.peerTxBytes[i])
+	}
+	return s
+}
+
+func persistTrafficSnapshot() error {
+	if trafficCacheStore == nil || trafficCacheInst == nil {
+		return nil
+	}
+	c := trafficCacheInst
+	c.mu.Lock()
+	if !c.hasDeltaSample {
+		c.mu.Unlock()
+		return nil
+	}
+	s := trafficCacheToSnapshotLocked(c)
+	c.mu.Unlock()
+	return trafficCacheStore.SaveTrafficCacheSnapshot(s)
+}
+
+// FlushTrafficCacheSnapshot writes the traffic ring to disk immediately (SIGTERM/SIGINT or tests).
+func FlushTrafficCacheSnapshot() error {
+	return persistTrafficSnapshot()
 }
 
 func (c *trafficCache) idxFor(bucketID int64) int {
@@ -518,7 +675,8 @@ func (c *trafficCache) buildSeries(nowMs int64, r TrafficRange) TrafficSeriesRes
 	return resp
 }
 
-// GetTrafficSeriesHandler returns cached traffic series for the requested range.
+// GetTrafficSeries uses wgctrl plus an in-memory traffic ring; the ring is periodically saved to
+// db/server/traffic_cache.json when the process was started with RegisterTrafficCachePersistence.
 func GetTrafficSeries() echo.HandlerFunc {
 	return func(c echo.Context) error {
 		ensureTrafficCache()
@@ -553,6 +711,4 @@ func GetTrafficSeries() echo.HandlerFunc {
 		return c.JSON(http.StatusOK, resp)
 	}
 }
-
-// (Intentionally no DB dependency: this endpoint uses wgctrl + the in-memory traffic cache.)
 

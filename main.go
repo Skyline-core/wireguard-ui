@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha512"
 	"embed"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -201,6 +203,7 @@ func main() {
 	initServerConfig(db, tmplDir)
 
 	// Warm traffic series cache in background so the Traffic page renders quickly.
+	handler.RegisterTrafficCachePersistence(db)
 	go handler.StartTrafficSeriesCache()
 
 	// Check if subnet ranges are valid for the server configuration
@@ -325,6 +328,21 @@ func main() {
 
 	initTelegram(initDeps)
 
+	go func() {
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-quit
+		app.Logger.Infof("Caught %v, saving traffic snapshot and shutting down", sig)
+		if err := handler.FlushTrafficCacheSnapshot(); err != nil {
+			app.Logger.Warnf("traffic snapshot save: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := app.Shutdown(ctx); err != nil {
+			app.Logger.Errorf("Echo shutdown: %v", err)
+		}
+	}()
+
 	if strings.HasPrefix(util.BindAddress, "unix://") {
 		// Listen on unix domain socket.
 		// https://github.com/labstack/echo/issues/830
@@ -337,10 +355,15 @@ func main() {
 			app.Logger.Fatalf("Cannot create unix socket. Error: %v", err)
 		}
 		app.Listener = l
-		app.Logger.Fatal(app.Start(""))
+		err = app.Start("")
+		if err != nil && err != http.ErrServerClosed {
+			app.Logger.Fatal(err)
+		}
 	} else {
-		// Listen on TCP socket
-		app.Logger.Fatal(app.Start(util.BindAddress))
+		err := app.Start(util.BindAddress)
+		if err != nil && err != http.ErrServerClosed {
+			app.Logger.Fatal(err)
+		}
 	}
 }
 

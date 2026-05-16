@@ -280,10 +280,15 @@ The server can send **push notifications** (e.g. peer created/removed/enabled/di
 
 #### Server setup
 
-1. Open **[Firebase Console](https://console.firebase.google.com/)** → your project → **Project settings** (gear) → **Service accounts**.
-2. Click **Generate new private key** and download the JSON. Store it on the server only (for example `/etc/wireguard-ui/firebase-adminsdk.json`). **Do not commit this file.** Restrict permissions (`chmod 600`, owned by the service user).
-3. Point wireguard-ui at that file using `**FCM_CREDENTIALS_FILE`** (recommended) or `**GOOGLE_APPLICATION_CREDENTIALS`** (same path; used if `FCM_CREDENTIALS_FILE` is empty).
-4. Restart wireguard-ui. You should see a log line such as `**FCM enabled`**. If credentials are missing or invalid, push stays off and an error is logged.
+1. Open **[Firebase Console](https://console.firebase.google.com/)** → select **your project** → **Project settings** (gear icon) → tab **Service accounts**.
+2. Under **Firebase Admin SDK** (wording may vary), choose **Node.js** or any language — what you need is **Generate new private key** (sometimes **Manage service account permissions** opens Google Cloud; the same key is created from the Firebase page’s **Generate new private key** button). Confirm the download; you get a single **`.json`** file.
+3. Verify the file looks like a Google **service account key**: it contains **`"type": "service_account"`**, **`"project_id"`**, **`"private_key"`**, and **`"client_email"`**. That file is what **`FCM_CREDENTIALS_FILE`** / **`GOOGLE_APPLICATION_CREDENTIALS`** must point to — **not** `google-services.json` from the Android app.
+4. Copy the JSON to the WireGuard UI host only (e.g. **`/etc/wireguard-ui/firebase-service-account.json`**). **Do not commit it.** Restrict access (`chmod 600` or `640` with a dedicated group, owned by the **`wireguard-ui`** process user).
+5. Set **`FCM_CREDENTIALS_FILE`** to that absolute path (recommended) or **`GOOGLE_APPLICATION_CREDENTIALS`** to the same path (used when `FCM_CREDENTIALS_FILE` is empty).
+6. If the server logs errors about an **API not enabled**, in **[Google Cloud Console](https://console.cloud.google.com/)** for the **same** `project_id` open **APIs & services → Enabled APIs** and enable **Firebase Cloud Messaging API** (FCM HTTP v1 uses it).
+7. Restart wireguard-ui. You should see a log line such as **`FCM enabled`**. If credentials are missing or invalid, push stays off and an error is logged. **Rotate** (revoke old key, generate a new JSON) if the file may have leaked.
+
+**Same project as the Android app:** The `project_id` in this JSON should match the Firebase project where you added the Android app and downloaded **`google-services.json`**. Two different files — one for the **server** (service account), one for the **Gradle client** (client config).
 
 #### Project ID
 
@@ -490,7 +495,7 @@ Assertion signatures include `**Origin`** inside `**clientDataJSON`**. Browser u
 
 **Server configuration checklist**
 
-1. `**WGUI_ANDROID_PASSKEY_SHA256`** — fingerprint(s) comma-separated (**hex**, with or without colons), matching Android Studio / `./gradlew signingReport` (**SHA-256**) for whatever build ships to devices; or an **absolute path** to a file whose contents are that string (readable by the **wireguard-ui** process user).
+1. `**WGUI_ANDROID_PASSKEY_SHA256`** — fingerprint(s) comma-separated (**hex**, with or without colons); or an **absolute path** to a file whose contents are that string (readable by the **wireguard-ui** process user). Obtain fingerprints from the Flutter Android project: **`cd android && ./gradlew :app:signingReport`**, then use the **`debug`** SHA-256 when you install debug-signed builds (dev APK) and the **`release`** SHA-256 when you install production-signed APK/AAB — **they differ because signing certs differ**. In Android Studio: **Gradle → Tasks → android → signingReport**. Add multiple hashes comma-separated when some devices still use another signing certificate.
 2. `**WGUI_ANDROID_PASSKEY_PACKAGE`** — optional `**applicationId`**, defaults to `**com.wireguardui.wireguard_ui_client`** inside `**assetlinks.json**`.
 3. **Reverse proxy exposes host-root asset links** proxying `**https://<hostname>/.well-known/assetlinks.json`** to WireGuard UI's `**http://backend:PORT/.well-known/assetlinks.json`**. `**https://hostname/wg/.well-known`** is **ignored** by Android's association crawler.
 4. **Mirror workaround:** If you truly cannot terminate `**/.well-known`** directly on WireGuard UI, `**GET https://vpn.example.net/wg/.well-known/assetlinks.json`** (duplicate route emitted when `**BASE_PATH=/wg`**; adjust path for your `**BASE_PATH`**) returns the identical JSON blob you can synchronize to `**https://vpn.example.net/.well-known/assetlinks.json**` elsewhere.
@@ -617,6 +622,18 @@ This section is about the **wireguard-ui HTTP process** (the web UI), not the op
 1. **Working directory** — The app opens its JSON store at `**./db`** relative to the current working directory (`jsondb.New("./db")` in `main.go`). The unit **must** set `WorkingDirectory` to a persistent directory owned by the service user (e.g. `/var/lib/wireguard-ui`). If you omit this, the database lands wherever systemd’s default cwd is (often `/` or `/root`), which is easy to misplace or permission incorrectly.
 2. **Binary** — Install the release binary (or your own build after `./prepare_assets.sh`) to a fixed path, e.g. `**/usr/local/bin/wireguard-ui`**, mode `0755`.
 3. **Environment** — All knobs (`BASE_PATH`, `BIND_ADDRESS`, `SESSION_SECRET`, `WGUI_`*, `FCM_CREDENTIALS_FILE`, etc.) are ordinary **process environment variables**. Set them with `Environment=` lines in the unit, or load a file with `**EnvironmentFile=`**.
+
+#### Scripted setup (`setup-linux-production.sh`)
+
+The repository root ships **`setup-linux-production.sh`** for an **interactive** install on systemd-based Linux hosts: creates paths under **`/etc/wireguard-ui`**, **`SESSION_SECRET_FILE`**, optional **Firebase service-account JSON** copy, optional **Android passkey SHA256** secret file and WebAuthn env vars, writes **`wireguard-ui.service`**, optionally installs **Caddy** (Debian/Ubuntu) and appends an `import` to **`/etc/caddy/Caddyfile`**.
+
+```bash
+cd /path/to/wireguard-ui
+chmod +x setup-linux-production.sh
+sudo ./setup-linux-production.sh
+```
+
+Review the prompts and the README sections on **`/.well-known/assetlinks.json`**, **`WGUI_ANDROID_PASSKEY_*`**, and **`FCM_CREDENTIALS_FILE`** before exposing the panel publicly.
 
 #### Register the service (step by step)
 
